@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyverilog-auto"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "Verilog AUTO code generation as a standalone Python tool"
+dependencies = []
+
+[project.scripts]
+pyverilog-auto = "pyverilog_auto.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pyverilog_auto*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

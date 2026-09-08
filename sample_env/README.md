@@ -37,6 +37,18 @@ bash run_demo.sh        # Linux/Mac/Git Bash
 run_demo.bat            # Windows cmd
 ```
 
+## Whole-design flow (filelist)
+
+`design.f` lists the two top files, the standalone demos and `-y rtl`:
+
+```bash
+# instance tree + dependency levels (rtl/ leaves are level 0, read-only)
+uv run pyverilog-auto hierarchy -f sample_env/design.f --relative-to filelist --view all
+
+# expand everything leaves first (the committed files are already expanded: 0 changes)
+uv run pyverilog-auto integrate -f sample_env/design.f --relative-to filelist --diff
+```
+
 ## Try it yourself — individual commands
 
 ```bash

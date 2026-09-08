@@ -21,6 +21,10 @@ pip install -e .
 
 Requires Python 3.10+. No external dependencies.
 
+Optional extras: `pip install -e ".[integ]"` adds pyslang for the design
+integration commands (`hierarchy`, `integrate`, `route`); see
+[Design integration](#design-integration-filelist-hierarchy-leaf-first-expansion).
+
 ## CLI Usage
 
 ```
@@ -205,6 +209,215 @@ deleter.delete()
 ```python
 engine.run(buf, config, inject=True)
 ```
+
+## Design integration (filelist, hierarchy, leaf-first expansion)
+
+The single-file commands above expand one file at a time. A parent's
+`/*AUTOINST*/` and `/*AUTOOUTPUT*/` only see the ports that its children
+have *after* their own expansion, so on a real design the files must be
+processed leaves first. The `hierarchy` and `integrate` commands do that
+from a filelist.
+
+Install the optional pyslang front-end for exact instance paths (generate
+blocks, instance arrays) and for the routing API:
+
+```bash
+uv pip install -e ".[integ]"        # pyslang >= 11, < 12
+```
+
+Without pyslang a text backend handles filelists, hierarchy and ordering
+(`--no-slang` forces it; `PYVERILOG_AUTO_NO_SLANG=1` disables pyslang globally).
+
+### Filelist format
+
+Standard `-f` dialect: one token or more per line, `//` `#` `/* */` comments,
+quoted paths, `\` line continuation, `$VAR` expansion, and:
+
+```
++incdir+src/inc          # or -I DIR
++define+SIM=1+FAST       # or -DNAME[=VAL]
++libext+.v+.sv
+-y ylib                  # library dirs: modules found by <name><ext> are read-only
+-v lib/cells.v           # library file: never expanded
+--top top                # optional
+src/top.v                # bare paths are source files (globs allowed); they ARE expanded
+-f more.f                # nested, relative to cwd (--relative-to cwd, default)
+-F sub.f                 # nested, relative to the nested file
+```
+
+`--relative-to filelist` resolves the bare paths of a `-f` file against
+the filelist's own directory (handy for checked-in filelists).
+
+### Commands
+
+```bash
+# instance tree, dependency levels (level 0 = leaves), leaf-first order
+pyverilog-auto hierarchy -f design.f --relative-to filelist --view all
+pyverilog-auto hierarchy -f design.f --json > design.json
+
+# expand every source file, leaves first (library files are never touched)
+pyverilog-auto integrate -f design.f --relative-to filelist --diff      # preview
+pyverilog-auto integrate -f design.f --relative-to filelist             # write
+```
+
+`integrate` options: `--dry-run`/`--no-save`, `--diff`, `--only REGEX`
+(files or module names), `--from LEVEL`, `--passes N|auto` (auto = one pass
+plus a second pass over dependency cycles and files that define several
+modules), `--strict` (fail on filelist/parse errors), `--lib REGEX` /
+`--src REGEX` (override which files are read-only).
+
+### Python API
+
+```python
+from pyverilog_auto.integ import Design
+
+design = Design.from_filelist("design.f", relative_to="filelist")   # or Design.from_files([...], library_dirs=[...])
+design.order().levels            # [[leaf files], [wrappers], [top]]
+for root in design.hierarchy():  # Instance tree; paths like "top.gen_cores[1].u_core.u_dma"
+    ...
+design.find_instances(r"\.u_dma$")
+design.lca("top.u_a.u_x", "top.u_b.u_y")
+report = design.expand_all(dry_run=False)
+print(report.summary())
+```
+
+## Routing (connect ports between instances by regex path)
+
+`route` connects a **signal, struct-typed signal or SystemVerilog interface**
+that already exists as a port on one module to any other module. Both ends
+are regexes over hierarchical instance paths; `\1`-style backreferences pair
+the matches. Requires pyslang.
+
+```bash
+pyverilog-auto route -f design.f --relative-to filelist \
+    --route 'top\.u_cluster(\d+)\.u_core\.u_dma:m_axi' 'top\.u_mem\.u_ctrl\1:s_axi' \
+    --dry-run                       # print the planned diff, write nothing
+pyverilog-auto route -f design.f --routes routes.toml --then-expand   # write, then expand leaf-first
+```
+
+`routes.toml` (literal strings keep the backslashes):
+
+```toml
+[[route]]
+name = "axi"
+src  = 'top\.u_cluster(\d+)\.u_core\.u_dma:m_axi'   # PATH_REGEX:port (port must exist on the source)
+dst  = 'top\.u_mem\.u_ctrl\1:s_axi'                 # PATH_TEMPLATE[:port]; port created if missing
+iface_conn = { clk = "clk", rst_n = "rst_n" }       # interface instance ports at the common ancestor
+
+[[route]]
+src = 'top\.u_cluster0\.u_ctl\.u_timer:tick'
+dst = 'top\.u_mem\.u_ctrl0:tick_in'
+```
+
+Spec keys: `src`, `dst`, `name`, `net` (net-name template, may use `\1`),
+`dst_port`, `dst_modport`, `iface_conn`, `iface_params`,
+`modport_policy` (`carry` | `plain`), `check_types`, `comment`.
+
+How it works:
+
+* The tool finds the lowest common ancestor of each pair, instantiates the
+  interface there (or declares the net), and punches a port through every
+  module in between. If one end is an ancestor of the other, the port is
+  exposed at that module's boundary instead.
+* **AUTO-native where markers exist, explicit edits otherwise.** A module
+  with `/*AUTOINPUT*/` `/*AUTOOUTPUT*/` and an `/*AUTOINST*/` instantiation
+  needs no edit for a plain signal: the following `integrate` (or
+  `--then-expand`) creates the port and the pin. Modules without markers get
+  an ANSI port entry (or a non-ANSI `input ... name;` declaration) and an
+  explicit `.port (net)` pin. Interface ports are always written explicitly
+  (AUTOINPUT never creates them); AUTOINST still emits `.p (p.modport)`.
+* Renames are explicit pins placed before `/*AUTOINST*/` (never AUTO_TEMPLATE,
+  which is module-scoped). Modules shared by several routed instances keep
+  one port name; the renames happen at the parent that hosts the instances.
+* A module instantiated elsewhere gets the new port too; such instances are
+  reported as `W_UNROUTED`, and under `/*AUTOINST*/` they receive `.port ()`
+  so nothing connects implicitly. `--strict` turns this into an error.
+* Everything is validated first (multi-driver, direction/type mismatches,
+  name collisions, black boxes, different tops, positional connections);
+  nothing is written when any error is reported. Runs are idempotent.
+* Inserted lines carry `// routed: <name>` comments (`--no-comment` to omit).
+
+Python: `design.plan_routes(specs)`, `design.apply_routes(specs, dry_run=..., strict=..., then_expand=...)`,
+`design.route("SRC -> DST")`.
+
+A runnable walk-through lives in `sample_env/route_demo/` (`run_route_demo.sh`
+or `run_route_demo.bat`): a top with two cores and four leaves, annotations in
+the leaves, and a script that collects, dry-runs, applies and re-runs the routes.
+
+### Patterns
+
+Endpoints in `routes.toml` and `--route SRC DST` are Python regular expressions
+full-matched against hierarchical instance paths from the top, followed by
+`:port`. Anything regex works, including `.*`, classes and groups:
+
+```toml
+src = 'top\.core.*instE:sig'        # 'core', anything, then 'instE'
+src = '.*instE:sig'                 # instE anywhere in the design
+src = 'top\.u_core[01]\.u_dma:irq'  # a character class
+```
+
+The match always covers the whole path from the top, so `core.*instE:sig` alone
+does not match `top.core.instA.instB.instE`; write `top.*core.*instE:sig`. In a
+regex `.` matches any character, so use `\.` for a literal dot when it matters
+(`core\.instA` versus `core.instA`). Capture groups pair the two ends: `\1` in
+`dst` is replaced by the text `src` captured.
+
+### In-source annotations (`//auto_route`)
+
+Routes can be written next to the port they concern. The annotation lives in
+the module that declares the port and applies to **every instance** of that
+module:
+
+```verilog
+output axi_if  data_ch;
+//auto_route data_ch :: to :: instE, instF        // this port drives instE and instF
+//auto_route ctrl_ch :: from :: instE             // instE's ctrl_ch drives this port
+//auto_route irq     :: to :: coreB.instE:irq_in  // dotted path suffix, other-end port name
+//auto_route busy    :: to :: re:top\.u_mem\.u_ctrl[01]   // regex target
+```
+
+Targets are instance names (path suffixes) resolved to the **nearest**
+matching instances (deepest common ancestor with the annotated instance);
+equally near matches fan out. A target that contains a regex metacharacter
+is a regular expression full-matched against the whole path from the top,
+exactly like the `routes.toml` patterns: `top.*instE` finds
+`top.core.instA.instB.instE` and `top\.u_mem\.u_ctrl[01]` finds both
+controllers (`re:REGEX` is the explicit spelling of the same thing).
+
+Routing to an ancestor exposes the port on that module's boundary. Two
+keywords resolve relative to each annotated instance: `$top` (alias `$root`)
+is the root of its tree and `$parent` its immediate parent. When the
+annotated module has several instances, give each boundary port a distinct
+name with placeholders in the far-end port name: `{inst}` (instance name),
+`{parent}`, `{path}` (path below the root, dots as `_`) and `{n}` (index
+among the module's instances in that tree). The far-end name also names the
+intermediate nets:
+
+```verilog
+//auto_route err   :: to :: top:err_{n}    // top gets output err_0, err_1 ...
+//auto_route m_axi :: to :: $parent        // parent gets an axi_if m_axi boundary port
+```
+
+Notes: a non-ANSI (`/*AUTOARG*/`) parent receives signal ports as body
+declarations that AUTOARG then lists; interface ports need an ANSI header,
+so routing an interface to an AUTOARG-style module is rejected before
+anything is written. AUTO-style parents already export unconsumed sub-instance
+outputs through AUTOOUTPUT, so `to :: top` mostly matters for hand-written
+intermediates, renamed ports and interfaces. The tool collects the annotations in a first
+pass, resolves them to exact paths, and writes a reviewable `routes.toml`:
+
+```bash
+pyverilog-auto route -f design.f --relative-to filelist --collect-only --routes-out routes.toml
+pyverilog-auto route -f design.f --relative-to filelist --routes routes.toml --then-expand
+# or in one go:
+pyverilog-auto route -f design.f --relative-to filelist --collect --routes-out routes.toml --then-expand
+```
+
+Python: `design.collect_auto_routes()` returns the resolved specs (plus
+warnings for annotations whose module is never instantiated or whose target
+is unreachable). For symmetric pairings (cluster0 -> ctrl0, cluster1 -> ctrl1)
+use a `routes.toml` with capture groups; annotations name instances, not
+positions.
 
 ## Differences from Emacs verilog-mode
 

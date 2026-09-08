@@ -219,8 +219,12 @@ def build_config_for_test(src: Path, tmp_path: Path) -> VerilogConfig:
     return config
 
 
-def _run_engine(filename: str, tmp_path: Path, inject: bool = False):
-    """Run the AUTO engine on *filename* and return (actual, golden) texts."""
+def _run_engine(filename: str, tmp_path: Path, inject: bool = False, db_factory=None):
+    """Run the AUTO engine on *filename* and return (actual, golden) texts.
+
+    *db_factory* optionally replaces the module database (used by the
+    pyslang reader-in-the-loop variant below).
+    """
     src = TESTS_DIR / filename
     expected = TESTS_OK_DIR / filename
     if not expected.exists():
@@ -256,7 +260,7 @@ def _run_engine(filename: str, tmp_path: Path, inject: bool = False):
     buf = VerilogBuffer.from_file(str(work))
 
     try:
-        engine = AutoEngine(config)
+        engine = AutoEngine(config, db_factory=db_factory)
         engine.run(buf, config, inject=inject)
     except Exception as exc:
         pytest.fail(f"Engine raised {type(exc).__name__}: {exc}")
@@ -284,3 +288,40 @@ def test_golden(filename, tmp_path):
     inject = False
     actual_content, golden_content = _run_engine(filename, tmp_path, inject=inject)
     assert actual_content == golden_content, f"Golden mismatch in {filename}"
+
+
+# ------------------------------------------------------------------
+# Reader-in-the-loop variant: submodule declarations come from the pyslang
+# CST reader (pyverilog_auto.integ.reader) instead of DeclParser.  Restricted
+# to the cases that look up submodules, to bound runtime.
+# ------------------------------------------------------------------
+
+_SLANG_READER_CASES = [
+    f for f in ALL_CASES
+    if re.match(r"^(autoinst|autoinout|automodport|autowire|autoinput|autooutput|Examp)", f)
+]
+
+
+def _slang_reader_factory():
+    from pyverilog_auto.integ.database import SlangReaderDatabase
+
+    return lambda cfg, path: SlangReaderDatabase(cfg, path)
+
+
+@pytest.mark.parametrize("filename", _SLANG_READER_CASES)
+def test_golden_slang_reader(filename, tmp_path):
+    """Same as :func:`test_golden`, with the pyslang reader serving submodules."""
+    pytest.importorskip("pyslang")
+    from pyverilog_auto.integ import is_slang_available
+
+    if not is_slang_available():
+        pytest.skip("pyslang disabled via PYVERILOG_AUTO_NO_SLANG")
+    if filename in _SKIP_CASES:
+        pytest.skip(f"{filename}: known skip (no module keyword)")
+    if filename in _LABEL_CASES:
+        pytest.skip(f"{filename}: requires end-block labeling (outside AUTO scope)")
+    if filename in _INJECT_CASES:
+        pytest.skip(f"{filename}: tests inject mode (separate feature)")
+
+    actual_content, golden_content = _run_engine(filename, tmp_path, db_factory=_slang_reader_factory())
+    assert actual_content == golden_content, f"Golden mismatch in {filename} (pyslang reader)"

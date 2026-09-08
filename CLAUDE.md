@@ -30,8 +30,39 @@ pyverilog_auto/
 ├── library/           # module_db, resolver, getopt
 ├── auto/              # engine + one file per AUTO type
 ├── indent/            # indentation engine
+├── integ/             # design integration: filelist, hierarchy, leaf-first expansion, routing
+│   ├── filelist.py    #   -f filelist parser -> Filelist; filelist_to_config()
+│   ├── sources.py     #   SourceFile: bytes/text/version + byte<->char offset maps
+│   ├── model.py       #   SrcRange, ModuleDef, ModuleRef, PortInfo, Instance, Diag
+│   ├── graph.py       #   file DAG, Tarjan SCC, leaf-first Order
+│   ├── textscan.py    #   markers/fences/pins/instantiations by regex (both backends)
+│   ├── frontend_text.py   # backend without pyslang
+│   ├── frontend_slang.py  # pyslang backend: SourceLoader, CST scan, elaboration, port_at
+│   ├── reader.py      #   SlangModuleReader: CST -> ModDecls (DeclParser parity)
+│   ├── database.py    #   DesignModuleDatabase / SlangReaderDatabase (ModuleDatabase subclasses)
+│   ├── design.py      #   Design facade
+│   ├── orchestrator.py    # Integrator: leaf-first AutoEngine runs with overlay/refresh
+│   ├── edits.py       #   char-planned, byte-applied text edits (CRLF safe, fence guard)
+│   ├── route.py       #   RouteSpec, endpoint grammar, backref pairing (pure)
+│   ├── route_plan.py  #   RoutePlanner: LCA/chains, naming, AUTO-native vs explicit, edits
+│   ├── routes_file.py #   TOML/JSON routes files
+│   ├── auto_route.py  #   //auto_route PORT :: to|from :: TARGETS annotations -> RouteSpecs + routes.toml writer
+│   └── cli_cmds.py    #   hierarchy / integrate / route handlers
 └── cli.py             # argparse CLI
 ```
+
+Design integration notes:
+- `AutoEngine(config, db_factory=None)`: the factory is the only engine hook; `None` keeps golden behavior.
+- The pyslang reader is CST-driven (never elaborated symbols): AUTOARG-style leaves elaborate as `module m ();`
+  and evaluated types lose `[WIDTH-1:0]`. Widths are sliced from the file bytes by token offsets.
+- Modules containing `` `ifdef``/`` `include`` or parse errors fall back to `DeclParser` (Emacs sees both branches).
+- pyslang byte offsets index `SourceFile.data`; `VerilogBuffer` text is LF-normalized; convert with
+  `SourceFile.char_offset/byte_offset`. Re-parses use a versioned buffer path (`path#vN`).
+- Routing edits never touch AUTO fences; renames are explicit pins before `/*AUTOINST*/`, not AUTO_TEMPLATE.
+- Tests: `tests/test_integ_*.py`, `tests/test_route_*.py`, `tests/test_routing.py`; fixtures in `tests/integ/`
+  (goldens under `expected/`). Baseline golden failures (35, pre-existing) are listed in the plan file.
+- `sample_env/route_demo/`: runnable routing walk-through (`run_route_demo.sh|.bat`, sources in `src/`,
+  scratch `work/` is gitignored); `tests/test_route_demo.py` exercises it.
 
 ## Test suite
 - `tests/` — 483 Verilog input files
@@ -53,6 +84,6 @@ Python is managed by uv in C:\Users\vinay\.local\bin
 
 ## Current phase
 <!-- Update this line at the start of each phase -->
-Phase: 2 — Parser Core (complete)
-Status: All 8 deliverables implemented and tested
-Last test run: 113 passed, 1 skipped (ExampUndef.v has no module keyword)
+Phase: 6 — Design integration (pyslang front-end, leaf-first expansion, routing API) implemented
+Status: `hierarchy` / `integrate` / `route` CLI + `pyverilog_auto.integ.Design` API; pyslang optional extra `[integ]`
+Baseline: 35 pre-existing golden failures (19 in test_golden.py, 16 in test_golden_autoinst.py); everything else green

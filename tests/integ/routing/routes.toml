@@ -1,0 +1,31 @@
+# Routes for the fixture; paths are full-matched against hierarchical instance names.
+
+[[route]]                 # 1. interface, \1 pairing: two clusters -> two controllers
+name = "axi"
+src  = 'top\.u_cluster(\d+)\.u_core\.u_dma:m_axi'
+dst  = 'top\.u_mem\.u_ctrl\1:s_axi'
+
+[[route]]                 # 2. plain signal, AUTO-native through cctl/cluster/top, explicit only in mem
+name = "tick"
+src  = 'top\.u_cluster0\.u_ctl\.u_timer:tick'
+dst  = 'top\.u_mem\.u_ctrl0:tick_in'
+
+[[route]]                 # 3. fully hand-written chain inside mem
+name = "err"
+src  = 'top\.u_mem\.u_ctrl0:err'
+dst  = 'top\.u_mem\.u_ctrl1:err_in'
+
+[[route]]                 # 4. struct through AUTO modules; the second cluster stays unrouted
+name = "req"
+src  = 'top\.u_cluster0\.u_core\.u_dma:req'
+dst  = 'top\.u_mem\.u_ctrl0:req_in'
+
+[[route]]                 # 5. destination is an ancestor: expose busy at the cluster boundary
+name = "busy"
+src  = 'top\.u_cluster(\d+)\.u_core\.u_dma:busy'
+dst  = 'top\.u_cluster\1:core_busy'
+
+[[route]]                 # 6. source is an input: one driver fans out to both dma instances
+name = "cfg"
+src  = 'top\.u_cluster(\d+)\.u_core\.u_dma:cfg'
+dst  = 'top\.u_mem\.u_ctrl0:cfg_o'

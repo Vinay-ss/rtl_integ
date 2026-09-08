@@ -26,10 +26,18 @@ if TYPE_CHECKING:
 class AutoEngine:
     """Drives AUTO expansion / deletion / injection on a single file."""
 
-    def __init__(self, config: "VerilogConfig | None" = None) -> None:
+    def __init__(
+        self,
+        config: "VerilogConfig | None" = None,
+        db_factory: "Callable[[VerilogConfig, str], object] | None" = None,
+    ) -> None:
         from ..config import VerilogConfig
 
         self.config = config or VerilogConfig()
+        # Optional factory ``(config, current_file) -> ModuleDatabase`` used by
+        # design integration to share a pyslang-backed module index.  ``None``
+        # keeps the classic per-file ``ModuleDatabase`` (golden behavior).
+        self._db_factory = db_factory
 
     # ------------------------------------------------------------------
     # Public API
@@ -94,8 +102,8 @@ class AutoEngine:
             if vh_key not in cfg.defines:
                 cfg.defines[vh_key] = v
 
-        # Build module database
-        db = ModuleDatabase(cfg, buf.filepath or ".")
+        # Build module database (or the design-level one when integrating)
+        db = (self._db_factory or ModuleDatabase)(cfg, buf.filepath or ".")
 
         # ----------------------------------------------------------
         # Step 0: AUTO_LISP handling

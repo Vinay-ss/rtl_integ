@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install (with the pyslang extra)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[integ]" pytest
+
+      - name: Unit, integration and routing tests
+        run: python -m pytest tests --ignore=tests/test_golden.py --ignore=tests/test_golden_autoinst.py -q -p no:cacheprovider
+
+      # The Emacs golden suite has 35 documented pre-existing failures (see CLAUDE.md);
+      # run it for visibility without failing the build.
+      - name: Golden suite (informational)
+        continue-on-error: true
+        run: python -m pytest tests/test_golden.py tests/test_golden_autoinst.py -q -p no:cacheprovider
+
+      - name: Routing demo
+        run: |
+          python -m pyverilog_auto route -f sample_env/route_demo/src/design.f --relative-to filelist --collect-only --routes-out routes.toml
+          python -m pyverilog_auto route -f sample_env/route_demo/src/design.f --relative-to filelist --routes routes.toml --dry-run

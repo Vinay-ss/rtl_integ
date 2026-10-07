@@ -32,7 +32,8 @@ include = ["pyverilog_auto*"]
 
 [tool.setuptools.package-data]
 "pyverilog_auto.gui" = [
-    "nvim/*.lua", "nvim/lua/rtl_integ/*.lua", "nvim/plugin/*.lua", "nvim/syntax/*.vim",
+    "nvim/*.lua", "nvim/lua/rtl_integ/*.lua", "nvim/lua/rtl_integ/themes/*.lua", "nvim/plugin/*.lua",
+    "nvim/syntax/*.vim", "nvim/colors/*.lua",
     "examples/demo/*.toml", "examples/demo/tpl/*", "examples/demo/rtl/*",
     "examples/demo_prepro/*.toml", "examples/demo_prepro/tpl/*", "examples/demo_prepro/rtl/*",
 ]

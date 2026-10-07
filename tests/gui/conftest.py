@@ -27,6 +27,12 @@ def proj_bt(tmp_path) -> Path:
 
 
 @pytest.fixture
+def proj_pkg(tmp_path) -> Path:
+    """Package types/enum values through header imports, implicit .name pins."""
+    return copy_fixture(tmp_path, "proj_pkg")
+
+
+@pytest.fixture
 def proj_pl(tmp_path) -> Path:
     """Perl-template fixture project."""
     return copy_fixture(tmp_path, "proj_pl")

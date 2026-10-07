@@ -178,7 +178,7 @@ def selftest(nvim: Optional[str], *, demo: str = "backtick", keep: bool = False,
     proj = copy_demo(demo, work)
     out = os.path.join(work, "selftest.txt")
     env = dict(os.environ, RTL_SMOKE_PROJECT=proj, RTL_SMOKE_OUT=out, RTL_INTEG_PYTHON=sys.executable,
-               NVIM_APPNAME="rtl_integ_gui_selftest")
+               NVIM_APPNAME="rtl_integ_gui_selftest", RTL_INTEG_SETTINGS=os.path.join(work, "settings.json"))
     env.pop("RTL_INTEG_OPEN", None)
     try:
         proc = subprocess.run([exe, "--headless", "--clean", "-u", INIT_LUA, "-c", f"luafile {SELFTEST_LUA}"],

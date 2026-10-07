@@ -12,18 +12,32 @@ vim.opt.splitbelow = true
 vim.opt.hidden = true
 vim.opt.updatetime = 300
 vim.opt.shada = ''          -- launcher sets NVIM_APPNAME; keep no history across projects
+vim.opt.laststatus = 3      -- one status line; windows are split by separator lines
+vim.opt.showtabline = 2     -- the toolbar
 vim.cmd('syntax on')
 vim.cmd('filetype plugin indent on')
-pcall(vim.cmd, 'colorscheme habamax')
 
-vim.filetype.add({ extension = { svp = 'systemverilog', plv = 'verilog', pyv = 'verilog' } })
+-- templates: .svp/.svpy/.svpl (SystemVerilog), .vpy/.vpl/.pyv/.plv (Verilog)
+vim.filetype.add({ extension = {
+  svp = 'systemverilog', svpy = 'systemverilog', svpl = 'systemverilog',
+  vpy = 'verilog', vpl = 'verilog', pyv = 'verilog', plv = 'verilog',
+} })
+-- the GUI's Verilog/SystemVerilog highlighting for every such file
+vim.api.nvim_create_autocmd('FileType', {
+  pattern = { 'verilog', 'systemverilog' },
+  callback = function(ev) vim.bo[ev.buf].syntax = 'rtlsv' end,
+})
 
 vim.cmd('runtime plugin/rtl_integ.lua')
 
 local cfg = vim.g.rtl_integ_config or {}
 if vim.env.RTL_INTEG_PYTHON and vim.env.RTL_INTEG_PYTHON ~= '' then cfg.python = vim.env.RTL_INTEG_PYTHON end
-require('rtl_integ').setup(cfg)
-require('rtl_integ')._setup_done = true
+local app = require('rtl_integ')
+app.setup(cfg)
+app._setup_done = true
+if not pcall(vim.cmd.colorscheme, app.state.theme) then
+  pcall(vim.cmd.colorscheme, 'rtl-tokyonight')
+end
 
 -- RTL_INTEG_OPEN: arguments for :RtlIntegOpen, joined by newlines (set by the launcher).
 local open_args = vim.env.RTL_INTEG_OPEN

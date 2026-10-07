@@ -11,6 +11,7 @@ import re
 from typing import Optional
 
 _IDENT = r"[A-Za-z_][\w$]*"
+_SKIP = re.compile(r"(?:\s+|//[^\n]*|/\*.*?\*/)*", re.S)      # whitespace and comments
 
 
 def _match_paren(text: str, open_pos: int) -> Optional[int]:
@@ -85,15 +86,29 @@ def _find_named(text: str, name: str, lo: int, hi: int) -> Optional[tuple[int, i
     return None
 
 
+def _find_implicit(text: str, name: str, lo: int, hi: int) -> Optional[tuple[int, int]]:
+    """(start, end) of an implicit ``.name`` connection in text[lo:hi]."""
+    for m in re.finditer(r"\.\s*" + re.escape(name) + r"\b", text[lo:hi]):
+        end = lo + m.end()
+        nxt = _SKIP.match(text, end).end()
+        if nxt < len(text) and text[nxt] in ",)":
+            return lo + m.start(), end
+    return None
+
+
 def rewrite_pin(lines: list[str], port: str, new_expr: str) -> Optional[list[str]]:
-    """Replace the expression of ``.port( ... )`` in the connection list."""
+    """Replace the expression of ``.port( ... )`` in the connection list (an
+    implicit ``.port`` becomes ``.port(new_expr)``)."""
     text = "\n".join(lines)
     span = _conn_list(text)
     if span is None:
         return None
     hit = _find_named(text, port, span[0], span[1])
     if hit is None:
-        return None
+        imp = _find_implicit(text, port, span[0], span[1])
+        if imp is None:
+            return None
+        return (text[:imp[1]] + f"({new_expr})" + text[imp[1]:]).split("\n")
     _dot, op, cl = hit
     return (text[:op + 1] + new_expr + text[cl:]).split("\n")
 
@@ -112,16 +127,19 @@ def rewrite_param(lines: list[str], name: str, new_expr: str) -> Optional[list[s
 
 
 def remove_pin(lines: list[str], port: str) -> Optional[list[str]]:
-    """Delete ``.port( ... )`` and one adjacent comma."""
+    """Delete ``.port( ... )`` (or an implicit ``.port``) and one adjacent comma."""
     text = "\n".join(lines)
     span = _conn_list(text)
     if span is None:
         return None
     hit = _find_named(text, port, span[0], span[1])
-    if hit is None:
-        return None
-    dot, _op, cl = hit
-    start, end = dot, cl + 1
+    if hit is not None:
+        start, end = hit[0], hit[2] + 1
+    else:
+        imp = _find_implicit(text, port, span[0], span[1])
+        if imp is None:
+            return None
+        start, end = imp
     after = re.match(r"[ \t]*,[ \t]*(\n[ \t]*)?", text[end:])
     if after:
         end += after.end()
@@ -231,21 +249,26 @@ def full_select_base(expr: str, dims: str) -> Optional[str]:
 
 
 def port_list_span(text: str) -> Optional[tuple[int, int]]:
-    """(open, close) of the ANSI port list in a module header text."""
-    m = re.search(r"\bmodule\s+" + _IDENT, text)
+    """(open, close) of the ANSI port list in a module header text:
+    ``module [lifetime] name [import ...;]... [#(...)] (...)``."""
+    m = re.search(r"\bmodule\s+(?:(?:static|automatic)\s+)?" + _IDENT, text)
     if m is None:
         return None
-    i = m.end()
-    # skip "#( ... )" right after the name
-    mm = re.match(r"\s*#\s*\(", text[i:])
-    if mm:
-        close = _match_paren(text, i + mm.end() - 1)
+    i = _SKIP.match(text, m.end()).end()
+    while re.match(r"import\b", text[i:]):          # package imports in the header
+        semi = text.find(";", i)
+        if semi < 0:
+            return None
+        i = _SKIP.match(text, semi + 1).end()
+    if text.startswith("#", i):                      # "#( ... )" parameter port list
+        j = _SKIP.match(text, i + 1).end()
+        if not text.startswith("(", j):
+            return None
+        close = _match_paren(text, j)
         if close is None:
             return None
-        i = close + 1
-    mm = re.match(r"\s*\(", text[i:])
-    if mm is None:
+        i = _SKIP.match(text, close + 1).end()
+    if not text.startswith("(", i):
         return None
-    op = i + mm.end() - 1
-    cl = _match_paren(text, op)
-    return (op, cl) if cl is not None else None
+    cl = _match_paren(text, i)
+    return (i, cl) if cl is not None else None

@@ -77,8 +77,11 @@ def _fmt_ports(ports: list[WPort]) -> list[str]:
 
 
 def _wrapper_text(module: str, origin: str, params: list[tuple[str, str]], ports: list[WPort],
-                  internal: list[str], aliases: list[str], bodies: list[list[str]], indent: str) -> str:
+                  internal: list[str], aliases: list[str], bodies: list[list[str]], indent: str,
+                  imports: list[str] = ()) -> str:
     lines = [f"// {module}: wrapper created by rtl-integ-gui from {origin}", f"module {module}"]
+    if imports:
+        lines.append("  import " + ", ".join(imports) + ";")
     if params:
         plines = [f"parameter {n} = {v}" for n, v in params]
         lines.append("  #(" + (",\n    ".join(plines)) + ")")
@@ -341,7 +344,7 @@ class WrapPlanner:
 
         def external_name(n: str) -> bool:
             d = ix.decls.get(n)
-            if d is not None and d.kind in ("param", "localparam", "typedef", "genvar"):
+            if ix.is_imported(n) or (d is not None and d.kind in ("param", "localparam", "typedef", "genvar")):
                 return False
             return (d is not None and d.kind in ("port", "iface_inst")) or ix.used_outside(n, owners)
 
@@ -393,6 +396,8 @@ class WrapPlanner:
         ports: list[WPort] = list(expr_ports)
         internal: list[tuple[str, Optional[Decl], str]] = []
         for n in names:
+            if ix.is_imported(n):
+                continue        # a package's type, parameter or enum value: the wrapper imports it too
             d = ix.decls.get(n)
             if d is not None and d.kind in ("param", "localparam"):
                 add_param(n)
@@ -619,20 +624,23 @@ class WrapPlanner:
                 else:
                     alias_lines.append(f"assign {p.name} = {p.net};")
         origin = f"{P.name} ({proj.rel(template)})"
-        wtext = _wrapper_text(self.module, origin, param_vals, ports, decl_lines, alias_lines, bodies, indent)
+        wtext = _wrapper_text(self.module, origin, param_vals, ports, decl_lines, alias_lines, bodies, indent,
+                              ix.imports)
         edits.add_file(wpath, wtext)
         with open(proj.path, "r", encoding="utf-8", newline="") as fh:
             manifest = fh.read()
         edits.set_text(proj.path, append_template_entry_text(manifest.replace("\r\n", "\n"), proj, entry))
 
-        # parent template: wrapper instance replaces the first unit, the others go
+        # parent template: the wrapper instance replaces the first unit (or the
+        # last, when a name it connects is declared after the first), the others go
         autoinst = self.port_naming == "net" and any(u.uses_autoinst for u in uses) and \
             all(not p.alias for p in ports)
-        inst_indent = indent_of(tlines[units[0].p_first - 1]) or indent
+        at = self._instance_position(ix, uses, units, ports, params)
+        inst_indent = indent_of(tlines[units[at].p_first - 1]) or indent
         inst_lines = _instance_lines(self.module, self.instance, ports, params, inst_indent, autoinst)
-        edits.replace_lines(template, units[0].p_first, units[0].p_last, inst_lines)
-        deleted: list[tuple[int, int]] = [(units[0].p_first, units[0].p_last)]
-        for unit in units[1:]:
+        edits.replace_lines(template, units[at].p_first, units[at].p_last, inst_lines)
+        deleted: list[tuple[int, int]] = [(units[at].p_first, units[at].p_last)]
+        for unit in units[:at] + units[at + 1:]:
             a, b = unit.p_first, unit.p_last
             if a >= 2 and not tlines[a - 2].strip() and b < len(tlines) and not tlines[b].strip():
                 b += 1  # drop one of the two blank lines around the removed statement
@@ -664,6 +672,20 @@ class WrapPlanner:
             plan.summary_lines.append(f"  the wrapper instance stays inside the template if at line "
                                       f"{stmts[0].guards[-1].start}")
         plan.summary_lines.append(f"  new file: {proj.rel(wpath)}")
+
+    @staticmethod
+    def _instance_position(ix: ModuleIndex, uses: list[InstUse], units: list[Unit], ports: list[WPort],
+                           params: list[str]) -> int:
+        """Index of the unit the wrapper instance replaces: the first one,
+        unless a net or parameter it connects is declared after the first
+        wrapped instance (SystemVerilog needs declarations before use); the
+        last unit comes after every declaration its instances use."""
+        first = min(uses[k].start for k in units[0].stmts)
+        for name in [p.net for p in ports] + list(params):
+            d = ix.decls.get(name)
+            if d is not None and d.kind != "port" and d.start > first:
+                return len(units) - 1
+        return 0
 
     def _drop_empty_guards(self, out: OutputInfo, units: list[Unit], deleted: list[tuple[int, int]],
                            tlines: list[str], template: str) -> None:

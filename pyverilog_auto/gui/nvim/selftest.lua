@@ -48,11 +48,91 @@ local ok, err = pcall(function()
   wait(function() return #tree.roots > 0 end, 240000, 'tree')
   check(layout.is_open(), 'layout has tree, source and console windows')
   local lines = tree_lines()
-  check(has_line(lines, 'top : top'), 'root node shown')
-  check(has_line(lines, 'u_c : stage  [S]'), 'subst tag on u_c')
-  check(has_line(lines, 'u_d : stage  [G]'), 'guarded tag on u_d')
-  check(has_line(lines, 'u_lane1 : stage  [Lx2]'), 'loop tag on u_lane1')
+  check(has_line(lines, 'top (top)'), 'root node shown')
+  check(has_line(lines, 'u_c (stage)  [S]'), 'subst tag on u_c')
+  check(has_line(lines, 'u_d (stage)  [G]'), 'guarded tag on u_d')
+  check(has_line(lines, 'u_lane1 (stage)  [Lx2]'), 'loop tag on u_lane1')
   check(has_line(console.lines(), 'build ok'), 'console reports the build')
+
+  -- toolbar, search box, border, console colours
+  local toolbar = require('rtl_integ.toolbar')
+  local search = require('rtl_integ.search')
+  local themes = require('rtl_integ.themes')
+  local columns = vim.o.columns
+  vim.o.columns = 220
+  local bar = toolbar.render()
+  check(bar:find(' Template ', 1, true) and bar:find(' Generated ', 1, true) and bar:find(' Integrated ', 1, true),
+    'toolbar has the three views')
+  vim.o.columns = 100
+  bar = toolbar.render()
+  check(bar:find(' Tpl ', 1, true) and bar:find(' Integ ', 1, true) and bar:find(' Build ', 1, true),
+    'narrow toolbar: short names, every button kept')
+  vim.o.columns = columns
+  check(vim.o.tabline:find('rtl_integ.toolbar', 1, true) ~= nil, 'toolbar is the tabline')
+  check(layout.wins.search ~= nil and vim.api.nvim_win_get_buf(layout.wins.search) == search.buf,
+    'search box under the tree')
+  check(vim.wo[layout.wins.tree].fillchars:find('vert:█', 1, true) ~= nil, 'thick border on the hierarchy')
+  check(vim.wo[layout.wins.console].winhighlight:find('Normal:RtlIntegConsole', 1, true) ~= nil,
+    'console has its own colours')
+
+  -- hierarchy labels; the file follows the view (clicks go through RtlIntegClick)
+  local function click(id) vim.fn.RtlIntegClick(id, 1, 'l', '    ') end
+  click(toolbar.ID.label)
+  check(app.state.label == 'name' and has_line(tree_lines(), 'u_c  [S]'), 'labels: instance name only')
+  click(toolbar.ID.label + 2)
+  check(has_line(tree_lines(), 'u_c : stage : rtl/stage.sv  [S]'), 'labels: file in the template view')
+  click(toolbar.ID.view + 1)
+  check(app.state.view == 'gen' and has_line(tree_lines(), 'u_c : stage : build/gen/stage.sv  [S]'),
+    'labels: file in the generated view')
+  click(toolbar.ID.view + 2)
+  check(app.state.view == 'integ' and has_line(tree_lines(), 'u_c : stage : build/integ/stage.sv  [S]'),
+    'labels: file in the integrated view')
+  click(toolbar.ID.view)
+  app.cycle_label()
+  app.cycle_label()
+  check(app.state.view == 'template' and app.state.label == 'module' and has_line(tree_lines(), 'u_c (stage)  [S]'),
+    'back to the template view and inst (module) labels')
+  local saved = require('rtl_integ.settings').load()
+  check(saved.label == 'module' and saved.view == 'template' and saved.rtl_view == 'integ', 'settings saved')
+
+  -- search box: instance and module names
+  search.set_text('lane')
+  check(#tree_lines() == 3 and tree.match_count == 2, 'search: the root and two lanes')
+  app.set_search_scope('module')
+  search.set_text('stage')
+  check(#tree_lines() == 7, 'search modules: every stage instance (' .. #tree_lines() .. ')')
+  app.set_search_scope('inst')
+  check(tree_lines()[1]:find('no instance matches', 1, true) ~= nil, 'search instances: none named stage')
+  app.set_search_scope('both')
+  search.set_text('u_*0')
+  check(#tree_lines() == 2 and has_line(tree_lines(), 'u_lane0'), 'search with a wildcard')
+  search.set_text('LANE')
+  check(tree_lines()[1]:find('no instance matches', 1, true) ~= nil, 'search: a capital makes it case-sensitive')
+  search.clear()
+  check(#tree_lines() == 7, 'search cleared')
+
+  -- mouse: a double-click expands / collapses, a click opens the module source
+  -- (the tree's mappings, with the mouse position stubbed: line 0 is the header)
+  local function mouse(lhs, path)
+    local line = 0
+    for l, n in pairs(tree.line_nodes) do
+      if n.path == path then line = l end
+    end
+    vim.fn.getmousepos = function() return { winid = layout.wins.tree, line = line } end
+    vim.api.nvim_buf_call(tree.buf, function() vim.fn.maparg(lhs, 'n', false, true).callback() end)
+    rawset(vim.fn, 'getmousepos', nil)
+  end
+  mouse('<2-LeftMouse>', 'top')
+  check(#tree_lines() == 1, 'double-click collapses')
+  mouse('<2-LeftMouse>', 'top')
+  check(#tree_lines() == 7, 'double-click expands')
+  source.current = nil
+  mouse('<LeftRelease>', nil)
+  check(source.current == nil, 'a click on the header opens nothing')
+  mouse('<LeftRelease>', 'top.u_d')
+  wait(function() return source.current ~= nil end, 30000, 'module source on a click')
+  check(source.current.path:match('stage%.sv$') ~= nil, 'a click opens the module source')
+  check(vim.bo[source.current.bufnr].syntax == 'rtlsv', 'SystemVerilog source highlighted (rtlsv)')
 
   check(tree.goto_path('top.u_c'), 'cursor to top.u_c')
   source.current = nil
@@ -74,12 +154,50 @@ local ok, err = pcall(function()
     'instantiation span ' .. tostring(uc) .. '-' .. tostring(uc and uc + 1))
   check(not vim.bo[source.current.bufnr].readonly, 'template is editable')
 
+  -- template highlighting: SystemVerilog, with the template code as Python
+  local tb = source.current.bufnr
+  local tpl = vim.b[tb].rtl_integ_tpl
+  check(vim.bo[tb].syntax == 'rtlsv' and type(tpl) == 'table' and tpl.lang == 'python',
+    'template highlighted (rtlsv, ' .. vim.inspect(tpl) .. ')')
+  local function syn_names(lnum, text)
+    local col = vim.api.nvim_buf_get_lines(tb, lnum - 1, lnum, false)[1]:find(text, 1, true)
+    return vim.api.nvim_buf_call(tb, function()
+      return table.concat(vim.tbl_map(function(id) return vim.fn.synIDattr(id, 'name') end,
+        vim.fn.synstack(lnum, col)), '>')
+    end)
+  end
+  local loop_line, module_line
+  for n, l in ipairs(vim.api.nvim_buf_get_lines(tb, 0, -1, false)) do
+    if l:find('for i in range', 1, true) then loop_line = n end
+    if l:find('^module top') then module_line = n end
+  end
+  local names = syn_names(loop_line, 'for')
+  check(names:find('rtlTplLine', 1, true) ~= nil and names:find('python', 1, true) ~= nil,
+    'template code highlighted as Python (' .. names .. ')')
+  check(syn_names(module_line, 'module') == 'rtlsvDesign', 'module keyword highlighted')
+  check(syn_names(uc, 'u_c') == 'rtlsvInstName', 'instance name highlighted')
+
   source.current = nil
   app.toggle_view()
   wait(function() return source.current ~= nil end, 30000, 'integ view')
   check(source.current.view == 'integ', 'toggled to the integrated RTL')
   check(vim.bo[source.current.bufnr].readonly, 'integrated RTL is read-only')
   app.toggle_view()
+
+  -- themes: every colorscheme loads; the console stays dark in all of them
+  local failed = {}
+  for _, t in ipairs(themes.list()) do
+    if not pcall(vim.cmd.colorscheme, t.id) then table.insert(failed, t.id) end
+  end
+  check(#failed == 0, 'all themes load (' .. table.concat(failed, ', ') .. ')')
+  local function console_dark()
+    local h = vim.api.nvim_get_hl(0, { name = 'RtlIntegConsole', link = false })
+    return h.bg ~= nil and themes.luminance(string.format('#%06x', h.bg)) < 0.05
+  end
+  check(app.set_theme('rtl-github-light') and console_dark(), 'console is dark in a light theme')
+  check(app.set_theme('morning') and console_dark(), 'console is dark under a light Neovim colorscheme')
+  check(app.set_theme('rtl-tokyonight') and console_dark(), 'console is dark in a dark theme')
+  check(require('rtl_integ.settings').load().theme == 'rtl-tokyonight', 'theme saved')
 
   tree.set_filter('top\\.u_lane.*')
   lines = tree_lines()
@@ -105,7 +223,7 @@ local ok, err = pcall(function()
   require('rtl_integ.ops').wrap()
   wait(function() return tree.by_path['top.u_ab'] ~= nil end, 120000, 'wrapped tree')
   lines = tree_lines()
-  check(has_line(lines, 'u_ab : ab_wrap  [W]'), 'wrapper shown with [W]')
+  check(has_line(lines, 'u_ab (ab_wrap)  [W]'), 'wrapper shown with [W]')
   check(has_line(console.lines(), 'leaf connectivity unchanged'), 'apply verified')
   check(has_line(console.lines(), '+   ab_wrap u_ab'), 'diff previewed in the console')
   check(#tree.marked_paths() == 0, 'marks cleared after apply')
@@ -169,7 +287,7 @@ local ok, err = pcall(function()
   tree.toggle_mark()
   require('rtl_integ.ops').wrap()
   wait(function() return tree.by_path['top.u_lanes.u_lane1'] ~= nil end, 120000, 'loop group wrap')
-  check(has_line(tree_lines(), 'u_lanes : lanes  [W]'), 'loop group wrapped through the question')
+  check(has_line(tree_lines(), 'u_lanes (lanes)  [W]'), 'loop group wrapped through the question')
 end)
 
 if ok then finish(true, 'all checks passed') else finish(false, tostring(err)) end

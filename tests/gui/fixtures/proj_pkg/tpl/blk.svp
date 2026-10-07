@@ -1,0 +1,30 @@
+// blk imports the package in its header; u_op uses implicit .name pins, an
+// enum parameter value and a type parameter; "late" is declared after u_op
+module blk
+  import p::*;
+(
+  input  logic         clk,
+  input  pkt_t         din,
+  output logic [W-1:0] y,
+  output op_e          op
+);
+
+  pkt_t mid;
+
+  leaf_op #(.DEF(OP_B), .T(pkt_t)) u_op (
+    .clk,
+    .din,
+    .dout (mid),
+    .op   (op)
+  );
+
+  pkt_t late;
+  assign late = mid;
+
+  leaf_sink u_sink (
+    .clk (clk),
+    .pin (late),
+    .y   (y)
+  );
+
+endmodule

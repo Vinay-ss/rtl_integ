@@ -39,6 +39,21 @@ class JournalEntry:
 class Journal:
     def __init__(self, state_dir: str):
         self.dir = os.path.join(state_dir, "journal")
+        self.root = os.path.dirname(os.path.abspath(state_dir))      # the project directory
+
+    def _stored(self, path: str) -> str:
+        """Paths are kept relative to the project, so a copied project's
+        journal acts on the copy."""
+        rel = os.path.relpath(os.path.abspath(path), self.root)
+        return path if rel.startswith("..") or os.path.isabs(rel) else rel.replace(os.sep, "/")
+
+    def _resolve(self, stored: str, title: str) -> str:
+        path = os.path.normpath(os.path.join(self.root, stored))
+        inside = os.path.normcase(path).startswith(os.path.normcase(self.root) + os.sep)
+        if not inside:
+            raise JournalError(f"'{title}' changed {stored}, which is outside this project "
+                               f"({self.root}); not undoing (was the project copied?)")
+        return path
 
     def entries(self) -> list[JournalEntry]:
         if not os.path.isdir(self.dir):
@@ -62,7 +77,8 @@ class Journal:
         os.makedirs(os.path.join(edir, "files"), exist_ok=True)
         entry = JournalEntry(eid, title, op, time.time(), details=details or {})
         for i, (path, data) in enumerate(before.items()):
-            rec = {"path": path, "before": None, "after_hash": file_hash(after[path]) if path in after else None}
+            rec = {"path": self._stored(path), "before": None,
+                   "after_hash": file_hash(after[path]) if path in after else None}
             if data is not None:
                 rel = f"files/{i}"
                 with open(os.path.join(edir, rel), "wb") as fh:
@@ -79,8 +95,8 @@ class Journal:
             raise JournalError("nothing to undo")
         entry = entries[-1]
         edir = os.path.join(self.dir, entry.id)
-        for rec in entry.files:
-            path = rec["path"]
+        paths = [self._resolve(rec["path"], entry.title) for rec in entry.files]
+        for rec, path in zip(entry.files, paths):
             if rec.get("after_hash") is None:
                 continue
             if not os.path.exists(path):
@@ -88,8 +104,7 @@ class Journal:
             with open(path, "rb") as fh:
                 if file_hash(fh.read()) != rec["after_hash"]:
                     raise JournalError(f"{path} changed after '{entry.title}'; not undoing")
-        for rec in entry.files:
-            path = rec["path"]
+        for rec, path in zip(entry.files, paths):
             if rec["before"] is None:
                 if os.path.exists(path):
                     os.remove(path)

@@ -3,7 +3,5 @@ if exists('b:current_syntax')
   finish
 endif
 syntax match rtlhierIcon /[▾▸]/
-syntax match rtlhierMark /^\s*\*/
-highlight default link rtlhierIcon Comment
-highlight default link rtlhierMark Search
+highlight default link rtlhierIcon RtlIntegIcon
 let b:current_syntax = 'rtlhier'

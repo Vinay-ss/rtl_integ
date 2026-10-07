@@ -1,0 +1,8 @@
+package p;
+  localparam int W = 8;
+  typedef enum logic [1:0] {OP_A, OP_B} op_e;
+  typedef struct packed {
+    op_e          op;
+    logic [W-1:0] d;
+  } pkt_t;
+endpackage

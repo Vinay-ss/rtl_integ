@@ -5,15 +5,16 @@ local M = {}
 local ns = vim.api.nvim_create_namespace('rtl_integ_console')
 M.buf = nil
 
+-- (the console window is dark in every theme: groups set by themes.panel_groups)
 local level_hl = {
-  error = 'DiagnosticError',
-  warning = 'DiagnosticWarn',
-  note = 'DiagnosticInfo',
+  error = 'RtlIntegConsoleError',
+  warning = 'RtlIntegConsoleWarn',
+  note = 'RtlIntegConsoleNote',
   info = nil,
-  cmd = 'Title',
-  diff_add = 'DiffAdd',
-  diff_del = 'DiffDelete',
-  diff_hdr = 'DiffText',
+  cmd = 'RtlIntegConsoleCmd',
+  diff_add = 'RtlIntegConsoleDiffAdd',
+  diff_del = 'RtlIntegConsoleDiffDel',
+  diff_hdr = 'RtlIntegConsoleDiffHdr',
 }
 
 function M.ensure_buf()

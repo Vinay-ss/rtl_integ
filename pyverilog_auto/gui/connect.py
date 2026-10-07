@@ -106,6 +106,42 @@ def _sx():
     return SyntaxKind, SyntaxNode, None
 
 
+def package_names(design: Design, pkg: str) -> set[str]:
+    """Names a package makes visible to an importer: parameters, types and
+    their enum values, variables, functions and tasks."""
+    SyntaxKind, SyntaxNode, _ = _sx()
+    mod = design.modules.get(pkg)
+    if mod is None or mod.kind != "package" or mod.syntax is None:
+        return set()
+    names: set[str] = set()
+
+    def enums(n) -> None:
+        if not isinstance(n, SyntaxNode):
+            return
+        if n.kind == SyntaxKind.EnumType:
+            names.update(d.name.valueText for d in n.members if isinstance(d, SyntaxNode))
+        for c in n:
+            enums(c)
+
+    for m in mod.syntax.members:
+        if not isinstance(m, SyntaxNode):
+            continue
+        k = m.kind
+        if k == SyntaxKind.TypedefDeclaration:
+            names.add(m.name.valueText)
+            enums(m.type)
+        elif k == SyntaxKind.ParameterDeclarationStatement:
+            names.update(d.name.valueText for d in m.parameter.declarators if isinstance(d, SyntaxNode))
+        elif k in (SyntaxKind.DataDeclaration, SyntaxKind.NetDeclaration):
+            names.update(d.name.valueText for d in m.declarators if isinstance(d, SyntaxNode))
+            enums(m.type)
+        elif k in (SyntaxKind.FunctionDeclaration, SyntaxKind.TaskDeclaration):
+            names.add(str(m.prototype.name).strip())
+        elif k == SyntaxKind.ClassDeclaration:
+            names.add(m.name.valueText)
+    return names
+
+
 class ModuleIndex:
     """Connectivity facts of one module in a (pyslang) Design."""
 
@@ -121,6 +157,8 @@ class ModuleIndex:
         self.decls: dict[str, Decl] = {}
         self.uses: dict[str, list[tuple[int, int]]] = {}    # name -> [(offset, owner id)]
         self.aliases: list[tuple[str, str]] = []             # ``assign a = b;`` between plain names
+        self.imports: list[str] = []                          # "pkg::*" / "pkg::name" visible in the module
+        self.imported: set[str] = set()                       # names those imports provide
         self.fences = self._fence_spans()
         self._build()
 
@@ -199,10 +237,40 @@ class ModuleIndex:
 
     # -- build ---------------------------------------------------------------
 
+    def _import(self, node) -> None:
+        SyntaxKind, SyntaxNode, Token = _sx()
+        for it in node.items:
+            if not isinstance(it, SyntaxNode):
+                continue
+            pkg, item = it.package.valueText, it.item.valueText
+            if f"{pkg}::{item}" not in self.imports:
+                self.imports.append(f"{pkg}::{item}")
+            self.imported |= package_names(self.design, pkg) if item == "*" else {item}
+
+    def _unit_imports(self) -> list:
+        """``import`` declarations of the compilation unit before the module."""
+        SyntaxKind, SyntaxNode, Token = _sx()
+        decl = self.module.syntax
+        root = getattr(decl, "parent", None)
+        if root is None or root.kind != SyntaxKind.CompilationUnit:
+            return []
+        here = decl.sourceRange.start.offset
+        return [m for m in root.members if isinstance(m, SyntaxNode) and m.kind == SyntaxKind.PackageImportDeclaration
+                and m.sourceRange.start.offset < here]
+
+    def is_imported(self, name: str) -> bool:
+        """*name* comes from a package import (and is not declared locally)."""
+        return name not in self.decls and name in self.imported
+
     def _build(self) -> None:
         SyntaxKind, SyntaxNode, Token = _sx()
         decl = self.module.syntax
         header = decl.header
+        for imp in self._unit_imports():
+            self._import(imp)
+        for imp in getattr(header, "imports", None) or []:
+            if isinstance(imp, SyntaxNode):
+                self._import(imp)
         hdr_owner = self._new_owner("port", None, header)
         params = getattr(header, "parameters", None)
         if params is not None:
@@ -269,6 +337,8 @@ class ModuleIndex:
             self._declaration(m, "var" if k == SyntaxKind.DataDeclaration else "net")
         elif k == SyntaxKind.PortDeclaration:
             self._body_port(m)
+        elif k == SyntaxKind.PackageImportDeclaration:
+            self._import(m)
         elif k == SyntaxKind.ParameterDeclarationStatement:
             owner = self._new_owner("param", None, m)
             p = m.parameter

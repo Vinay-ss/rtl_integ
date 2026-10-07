@@ -113,20 +113,62 @@ In the backtick syntax:
 
 ## The window
 
-Tree keys: `<CR>` module source, `i` instantiation site, `t` template/RTL
-view, `o` expand, `m` mark, `M` clear marks, `W` wrap marked, `H` hoist,
-`U` unroll, `u` undo, `R` rebuild, `/` filter (regex matched against the whole
-path from the top, e.g. `top.*core.*instE`), `K` info, `?` help.
+```
+ rtl_integ | View [Template] Generated Integrated | Labels Inst [Inst (Mod)] Inst : Mod : File | Theme ...   Build Undo Help
+ HIERARCHY             #  top.svp  Template  tpl/top.svp
+  v top (top)          #  ... template / RTL, highlighted ...
+      u_a (stage)      #
+  ---------------------#--------------------------------------------
+ SEARCH  Both Inst Module #  CONSOLE
+  lane                 #  build ok: 0 error(s), 0 warning(s)
+```
+
+**Toolbar** (clickable): the view of the source panel (**Template**,
+**Generated** = prepro output in `gen_dir`, **Integrated** = after AUTO
+expansion), the hierarchy labels (`u_c`, `u_c (stage)` or
+`u_c : stage : rtl/stage.sv`, the file of the current view), the theme, and
+Build / Undo / Help.  In a narrow window the names get shorter.
+
+**Hierarchy**: a click opens the module source, a double-click expands or
+collapses.  Keys: `<CR>` module source, `i` instantiation site, `t`
+template / RTL view, `L` labels, `o` expand, `f` search, `m` mark, `M` clear
+marks, `W` wrap marked, `H` hoist, `U` unroll, `u` undo, `R` rebuild, `/`
+filter (regex matched against the whole path from the top, e.g.
+`top.*core.*instE`), `T` theme, `K` info, `?` help.
+
+**Search box** (under the hierarchy): filters the tree while you type by
+instance name, module name or both (buttons in its header, or `<Tab>`).
+Text is matched anywhere in the name, ignoring case unless it has a capital;
+`*` and `?` are wildcards.  `<CR>` goes to the first match, `<Esc>` back to
+the tree (the filter stays), `<C-c>` clears.
 
 Tags: `[S]` substituted template text, `[G]` inside a template `if`,
 `[Lx4]` printed by a template loop (4 times), `[C]` printed by template code,
 `[W]` wrapper made by the GUI, `[BB]` black box, `[IF]` interface.
 
+**Source panel**: Verilog/SystemVerilog highlighting (IEEE 1800-2017, module,
+instance and port names) with the template code highlighted as Python or Perl
+(`syntax/rtlsv.vim`).  Template extensions `.svp .svpy .svpl` (SystemVerilog)
+and `.vpy .vpl .pyv .plv` (Verilog) are recognised.
+
+**Themes**: Tokyo Night (default), Catppuccin Mocha / Latte, Kanagawa,
+Rosé Pine, Gruvbox, One Dark, Dracula, Nord, Nightfox, GitHub Light, plus
+Neovim's own colorschemes.  The menu (toolbar or `T`) previews while moving;
+`:colorscheme rtl-<name>` works too.  The console stays dark in every theme.
+View, labels, theme and search scope are remembered (`rtl_integ_settings.json`
+in the GUI's Neovim data directory, or the file named by `$RTL_INTEG_SETTINGS`).
+
 Console: `<CR>` or `i` in the console asks for a command (`help`, `build`,
 `diag`, `find REGEX`, `info PATH`); diagnostics also go to the quickfix list.
 
-Commands: `:RtlIntegOpen`, `:RtlBuild[!]`, `:RtlView template|integ|gen`,
+Commands: `:RtlIntegOpen`, `:RtlBuild[!]`, `:RtlView template|gen|integ`,
+`:RtlLabel name|module|file`, `:RtlTheme [NAME]`, `:RtlSearch [TEXT]`,
 `:RtlWrap`, `:RtlHoist`, `:RtlUnroll`, `:RtlUndo`, `:RtlConsole CMD`.
+
+Options (`vim.g.rtl_integ_config` before the plugin loads): `tree_width`,
+`console_height`, `view`, `label`, `theme`, `tree_border` (`thick` | `thin`),
+`highlight` (`false` keeps your own Verilog highlighting), `search_scope`,
+`build_on_save`, `python`.
 
 ## Operations
 

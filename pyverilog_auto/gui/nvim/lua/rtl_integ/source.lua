@@ -34,6 +34,38 @@ function M.reload_all(root)
   for _, b in ipairs(M.project_buffers(root)) do M.reload(b) end
 end
 
+local VERILOG_EXT = { v = true, vh = true, plv = true, pyv = true, vpy = true, vpl = true }
+local SV_EXT = { sv = true, svh = true, svp = true, svpy = true, svpl = true }
+
+-- Filetype, and the plugin's Verilog/SystemVerilog syntax (syntax/rtlsv.vim)
+-- told which template delimiters and code language a project template uses.
+function M.setup_syntax(bufnr, path)
+  local app = require('rtl_integ')
+  local tpl = app.template_info(path)
+  local ext = (path:match('%.([%w_]+)$') or ''):lower()
+  local ft = vim.bo[bufnr].filetype
+  if ft == '' or (tpl and ft ~= 'systemverilog' and ft ~= 'verilog') then
+    if VERILOG_EXT[ext] then
+      vim.bo[bufnr].filetype = 'verilog'
+    elseif SV_EXT[ext] or tpl then
+      vim.bo[bufnr].filetype = 'systemverilog'
+    end
+    ft = vim.bo[bufnr].filetype
+  end
+  if not app.config.highlight or (ft ~= 'systemverilog' and ft ~= 'verilog') then return end
+  local want = tpl and { syntax = tpl.syntax, lang = tpl.lang } or nil
+  if vim.bo[bufnr].syntax == 'rtlsv' and vim.deep_equal(want, vim.b[bufnr].rtl_integ_tpl) then return end
+  if want then
+    vim.b[bufnr].rtl_integ_tpl = want
+  else
+    pcall(vim.api.nvim_buf_del_var, bufnr, 'rtl_integ_tpl')
+  end
+  vim.api.nvim_buf_call(bufnr, function()
+    vim.cmd('setlocal syntax=OFF')
+    vim.cmd('setlocal syntax=rtlsv')
+  end)
+end
+
 local function open_file(win, path, readonly)
   local bufnr = vim.fn.bufnr(path)
   if bufnr == -1 then
@@ -48,14 +80,7 @@ local function open_file(win, path, readonly)
     vim.bo[bufnr].modifiable = false
   end
   vim.api.nvim_win_set_buf(win, bufnr)
-  if vim.bo[bufnr].filetype == '' then
-    local ext = path:match('%.([%w_]+)$') or ''
-    if ext == 'sv' or ext == 'svh' or ext == 'v' or ext == 'vh' then
-      vim.bo[bufnr].filetype = (ext == 'v' or ext == 'vh') and 'verilog' or 'systemverilog'
-    elseif ext == 'svp' or ext == 'plv' or ext == 'pyv' then
-      vim.bo[bufnr].filetype = 'systemverilog'
-    end
-  end
+  M.setup_syntax(bufnr, path)
   return bufnr
 end
 
@@ -65,6 +90,7 @@ function M.show(loc, opts)
   local layout = require('rtl_integ.layout')
   local win = layout.source_win()
   local bufnr = open_file(win, loc.path, loc.readonly)
+  layout.style_source(win)
   local nlines = vim.api.nvim_buf_line_count(bufnr)
   local line = math.max(1, math.min(loc.line or 1, nlines))
   local last = math.max(line, math.min(loc.end_line or line, nlines))
@@ -77,11 +103,18 @@ function M.show(loc, opts)
   vim.b[bufnr].rtl_integ_view = loc.view
   M.current = vim.tbl_extend('force', {}, loc, { bufnr = bufnr })
   if opts.focus then vim.api.nvim_set_current_win(win) end
+  require('rtl_integ.layout').redraw_bars()
   return bufnr
 end
 
+-- Fallback links; the themes (themes.panel_groups) set the real colours.
 function M.setup_highlights()
-  vim.api.nvim_set_hl(0, 'RtlIntegSpan', { default = true, link = 'Visual' })
+  local set = function(name, link) vim.api.nvim_set_hl(0, name, { default = true, link = link }) end
+  set('RtlIntegSpan', 'Visual')
+  set('RtlIntegSourceFile', 'WinBar')
+  set('RtlIntegSourceView', 'TabLineSel')
+  set('RtlIntegSourcePath', 'Comment')
+  set('RtlIntegSourceBar', 'WinBar')
 end
 
 return M

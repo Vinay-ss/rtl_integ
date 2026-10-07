@@ -56,6 +56,47 @@ def test_append_template_entry_keeps_tables(proj_py):
     assert again.wrap.port_naming == "net"
 
 
+def _use_gen_dir(root, gen_dir="rtl"):
+    m = root / "rtl_integ_project.toml"
+    m.write_text(m.read_text().replace('build_dir = "build"', f'build_dir = "build"\ngen_dir = "{gen_dir}"'))
+
+
+def test_gen_dir_outside_build(proj_py, slang):
+    # generated files go to the project's gen dir; line maps and the gen
+    # filelist stay under build/
+    _use_gen_dir(proj_py, "out")
+    proj, res = _build(proj_py)
+    assert proj.gen_dir == str(proj_py / "out")
+    assert sorted(p.name for p in (proj_py / "out").iterdir()) == ["stage.sv", "top.sv"]
+    assert (proj_py / "build" / "maps" / "top.sv.map.json").exists()
+    gen_f = (proj_py / "build" / "gen.f").read_text()
+    assert "../out/top.sv" in gen_f and "../out/stage.sv" in gen_f
+    assert res.gen_design is not None and res.gen_design.instance("top.u_c") is not None
+    assert SourceMap(res).instance_locs(res.design.instance("top.u_c"))["gen"].path.endswith(
+        os.path.join("out", "top.sv"))
+    # an output no entry produces any more is removed, other files are left alone
+    (proj_py / "out" / "notes.txt").write_text("mine")
+    m = proj_py / "rtl_integ_project.toml"
+    m.write_text(m.read_text().replace('[[source]]\npath = "rtl/stage.sv"\n', ""))
+    proj = load_project(str(proj_py))
+    Builder(proj).build()
+    assert sorted(p.name for p in (proj_py / "out").iterdir()) == ["notes.txt", "top.sv"]
+
+
+def test_gen_dir_never_overwrites_an_input(proj_py):
+    _use_gen_dir(proj_py, "tpl")
+    tpl = proj_py / "tpl" / "top.svp"
+    m = proj_py / "rtl_integ_project.toml"
+    m.write_text(m.read_text().replace('out = "top.sv"', 'out = "top.svp"'))
+    before = tpl.read_bytes()
+    res = Builder(load_project(str(proj_py))).build()
+    assert not res.ok and "would overwrite an input file" in str(res.diagnostics[0])
+    assert tpl.read_bytes() == before
+    with pytest.raises(ProjectError):
+        m.write_text(m.read_text().replace('gen_dir = "tpl"', 'gen_dir = "."'))
+        load_project(str(proj_py))
+
+
 def test_build_outputs_and_classes(proj_py, slang):
     proj, res = _build(proj_py)
     outs = {o.out: o for o in res.outputs}
@@ -142,6 +183,11 @@ def test_session_tree_and_locate(proj_py, slang):
     assert root["path"] == "top" and root["class"] == "TOP"
     tags = {c["name"]: c["tag"] for c in root["children"]}
     assert tags == {"u_a": "", "u_b": "", "u_c": "S", "u_d": "G", "u_lane0": "Lx2", "u_lane1": "Lx2"}
+    assert root["files"] == {"template": "tpl/top.svp", "gen": "build/gen/top.sv", "integ": "build/integ/top.sv"}
+    assert root["children"][2]["files"] == {"template": "rtl/stage.sv", "gen": "build/gen/stage.sv",
+                                            "integ": "build/integ/stage.sv"}
+    assert [(os.path.basename(t["src"]), t["lang"], t["syntax"]) for t in summary["templates"]] == [
+        ("top.svp", "python", "prepro")]
     loc = s.locate("top.u_c", what="inst")
     assert loc["view"] == "template" and loc["line"] == 21 and loc["end_line"] == 22 and not loc["readonly"]
     loc = s.locate("top.u_c", what="module")

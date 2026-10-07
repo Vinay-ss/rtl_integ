@@ -139,6 +139,7 @@ class Session:
             "top": [r.path for r in res.design.hierarchy()] if res and res.design else [],
             "errors": sum(1 for d in (res.diagnostics if res else []) if d.severity == "error"),
             "warnings": sum(1 for d in (res.diagnostics if res else []) if d.severity == "warning"),
+            "templates": [{"src": t.src, "lang": t.lang, "syntax": t.syntax} for t in proj.templates],
         }
 
     def diagnostics(self) -> list[dict]:
@@ -157,26 +158,36 @@ class Session:
                         names.add(m.name)
         return names
 
-    def _node(self, inst: Instance, wrappers: set[str]) -> dict:
+    def _module_files(self, name: str, cache: dict[str, dict]) -> dict:
+        """Project-relative file defining module *name* in each view."""
+        if name not in cache:
+            assert self.srcmap is not None
+            proj = self._need_project()
+            cache[name] = {v: proj.rel(loc.path) for v, loc in self.srcmap.module_locs(name).items()}
+        return cache[name]
+
+    def _node(self, inst: Instance, wrappers: set[str], files: dict[str, dict]) -> dict:
         assert self.srcmap is not None
         st = self.srcmap.statement_of(inst) if inst.parent is not None else None
         return {
             "path": inst.path,
             "name": inst.name,
             "module": inst.module_name,
+            "files": self._module_files(inst.module_name, files),
             "class": st.cls if st else "TOP",
             "tag": st.tag() if st else "",
             "reason": st.reason if st else "",
             "blackbox": inst.is_blackbox,
             "iface": inst.is_interface,
             "wrapper": inst.module_name in wrappers,
-            "children": [self._node(c, wrappers) for c in inst.children],
+            "children": [self._node(c, wrappers, files) for c in inst.children],
         }
 
     def tree(self) -> dict:
         res = self._need_build()
         wrappers = self._wrapper_modules()
-        return {"roots": [self._node(r, wrappers) for r in res.design.hierarchy()]}
+        files: dict[str, dict] = {}
+        return {"roots": [self._node(r, wrappers, files) for r in res.design.hierarchy()]}
 
     def instance(self, path: str) -> Instance:
         res = self._need_build()

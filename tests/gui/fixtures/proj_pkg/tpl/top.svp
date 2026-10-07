@@ -1,0 +1,16 @@
+// top does not import the package itself
+module top (
+  input  logic       t_clk,
+  input  p::pkt_t    t_din,
+  output logic [7:0] t_y,
+  output logic [1:0] t_op
+);
+
+  blk u_blk (
+    .clk (t_clk),
+    .din (t_din),
+    .y   (t_y),
+    .op  (t_op)
+  );
+
+endmodule

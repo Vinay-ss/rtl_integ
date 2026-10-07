@@ -9,6 +9,7 @@ Example::
     [project]
     top = "top"
     build_dir = "build"
+    gen_dir = "rtl"              # prepro output (default: <build_dir>/gen); line maps stay in build_dir
     include_dirs = ["inc"]
     defines = { SYNTH = "1" }
     perl = ""                    # empty: PATH / Git-for-Windows perl
@@ -125,6 +126,7 @@ class Project:
     root: str
     top: list[str] = field(default_factory=list)
     build_dir: str = ""
+    gen_root: str = ""               # gen_dir from the manifest ("": <build_dir>/gen)
     include_dirs: list[str] = field(default_factory=list)
     library_dirs: list[str] = field(default_factory=list)
     libexts: list[str] = field(default_factory=list)
@@ -142,7 +144,18 @@ class Project:
 
     @property
     def gen_dir(self) -> str:
-        return os.path.join(self.build_dir, "gen")
+        """Where prepro writes the generated files (and plain sources are copied)."""
+        return self.gen_root or os.path.join(self.build_dir, "gen")
+
+    @property
+    def maps_dir(self) -> str:
+        """Line maps: next to the generated files in the default layout,
+        under the build directory when the generated files go elsewhere."""
+        return os.path.join(self.build_dir, "maps") if self.gen_root else self.gen_dir
+
+    @property
+    def gen_filelist(self) -> str:
+        return os.path.join(self.build_dir, "gen.f") if self.gen_root else os.path.join(self.gen_dir, "design.f")
 
     @property
     def integ_dir(self) -> str:
@@ -226,6 +239,10 @@ def load_project(path: str) -> Project:
     top = p.get("top")
     proj.top = _str_list(top, "project.top")
     proj.build_dir = os.path.normpath(os.path.join(root, p.get("build_dir", "build")))
+    if p.get("gen_dir"):
+        proj.gen_root = os.path.normpath(os.path.join(root, p["gen_dir"]))
+        if os.path.normcase(proj.gen_root) == os.path.normcase(root):
+            raise ProjectError("project.gen_dir must be a directory of its own, not the project directory")
     proj.include_dirs = [proj.abs(d) for d in _str_list(p.get("include_dirs"), "project.include_dirs")]
     proj.library_dirs = [proj.abs(d) for d in _str_list(p.get("library_dirs"), "project.library_dirs")]
     proj.libexts = _str_list(p.get("libexts"), "project.libexts")

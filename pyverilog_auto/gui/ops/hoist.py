@@ -25,7 +25,7 @@ from typing import Optional
 
 from ...integ.model import Instance, ModuleDef
 from ..build import OutputInfo
-from ..connect import ConnectError, InstUse, ModuleIndex
+from ..connect import ConnectError, InstUse, ModuleIndex, package_names
 from ..srcmap import CODE, GUARDED, LITERAL, LOOP, SUBST, Statement
 from .common import OpError, Plan, Question, capture_values, free_variables, indent_of, literal_safe, unique_name
 from .units import drop_empty_guards, header_lines, marker_of, terminator_lines
@@ -147,9 +147,12 @@ class HoistPlanner:
         ports: list[str] = []
         shared: list[str] = []
         local: list[str] = []
+        pkg_used: list[str] = []        # package types / parameters / enum values (stay as written)
         for n in ixW.names_of(uX):
             d = ixW.decls.get(n)
-            if d is not None and d.kind in ("param", "localparam"):
+            if ixW.is_imported(n):
+                pkg_used.append(n)
+            elif d is not None and d.kind in ("param", "localparam"):
                 params.append(n)
             elif d is not None and d.kind == "port":
                 ports.append(n)
@@ -222,6 +225,8 @@ class HoistPlanner:
         # -- parent edits (one per instantiation statement of W) -------------------------
         per_parent: dict[str, int] = {}
         for c in copies:
+            if c.parent_mod.name not in per_parent:
+                self._import_into_parent(c, ixW, pkg_used)
             per_parent[c.parent_mod.name] = per_parent.get(c.parent_mod.name, 0) + 1
         for c in copies:
             self._plan_copy(c, X, uX, ixW, bodyX, params, ports, removed, added, shared, local,
@@ -242,6 +247,39 @@ class HoistPlanner:
             plan.summary_lines.append(f"  removed:  {W.name} ({self.proj.rel(outW.src)}) and its instances")
         elif self._w_empty(ixW, uX):
             plan.note("N_EMPTY", f"{W.name} has nothing left inside")
+
+    def _import_into_parent(self, c: _Copy, ixW: ModuleIndex, names: list[str]) -> None:
+        """Package names X uses must be visible in the parent too: add the
+        wrapper's imports that provide them to the parent's module header."""
+        ixP = c.ix
+        missing = {n for n in names if not ixP.is_imported(n) and n not in ixP.decls}
+        if not missing:
+            return
+        need = []
+        for imp in ixW.imports:
+            pkg, item = imp.split("::", 1)
+            provides = package_names(self.design, pkg) if item == "*" else {item}
+            if provides & missing and imp not in ixP.imports:
+                need.append(imp)
+        P = c.parent_mod
+        gm = self.sm.gen_module(P.name)
+        gd = self.res.gen_design
+        hint = f"add 'import {', '.join(need) or '<package>::*'};' to {P.name} first"
+        if not need or gm is None or gd is None:
+            self._fail("E_HOIST_PKG", f"{', '.join(sorted(missing))} not visible in {P.name}; {hint}")
+        out = c.stmt.output
+        g0 = gm.keyword_range.line
+        g1 = gd.files[gm.file].line_col(max(gm.header_range.start, gm.header_range.end - 1))[0]
+        st = self.sm.classify_gen_span(out, g0, g1)
+        if st.cls not in (LITERAL, SUBST) or st.tpl_start is None:
+            self._fail("E_HOIST_PKG", f"{P.name}'s header is produced by template code; {hint}")
+        text = "\n".join(self.plan.edits.line_range_text(out.src, st.tpl_start, st.tpl_end))
+        m = re.search(r"\bmodule\s+(?:(?:static|automatic)\s+)?[A-Za-z_][A-Za-z0-9_$]*", text)
+        if m is None:
+            self._fail("E_HOIST_PKG", f"{P.name}: header not found in the template; {hint}")
+        new = text[:m.end()] + "\n  import " + ", ".join(need) + ";" + text[m.end():]
+        self.plan.edits.replace_lines(out.src, st.tpl_start, st.tpl_end, new.split("\n"))
+        self.plan.note("N_IMPORT", f"{P.name} now imports {', '.join(need)} (for {', '.join(sorted(missing))})")
 
     @staticmethod
     def _w_empty(ixW: ModuleIndex, uX: InstUse) -> bool:
@@ -509,10 +547,12 @@ class HoistPlanner:
             new_w = r
         for p in removed:
             pin = c.use.pin(p)
-            if pin is None or pin.in_fence or pin.implicit:
+            if pin is None or pin.in_fence:
                 continue
             r = remove_pin(new_w, p)
             if r is None:
+                if pin.implicit:
+                    continue            # covered by ".*": nothing written to remove
                 self._fail("E_HOIST_PIN", f"cannot remove pin {p} from {c.wi}")
             new_w = r
 

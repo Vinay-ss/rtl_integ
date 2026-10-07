@@ -1,3 +1,10 @@
+# Line endings: the repository is LF-only, and the tests compare tool output
+# byte for byte with fixtures and goldens (the tools keep each file's own line
+# endings), so check text files out with LF on every platform, whatever
+# core.autocrlf says.  Batch files keep CRLF for cmd.exe.
+* text=auto eol=lf
+*.bat text eol=crlf
+
 *.v linguist-language=SystemVerilog
 *.vh linguist-language=SystemVerilog
 *.sv linguist-language=SystemVerilog

@@ -2,6 +2,22 @@ Self-contained downloads of **rtl-integ-gui**, the Neovim-based GUI for browsing
 template-generated RTL (wrap instances into a wrapper, hoist them out, edits go into the prepro templates).
 Nothing else needs to be installed; Perl is needed only for Perl (`// pl`) templates.
 
+### New in 0.3.0
+
+- **Toolbar**: switch the source view (Template / Generated / Integrated), the hierarchy labels and the
+  theme with a click; Build, Undo and Help buttons.
+- **Hierarchy**: labels `inst`, `inst (module)` or `inst : module : file`; a search box that filters by
+  instance or module name while you type; a click opens the module source, a double-click expands or
+  collapses.
+- **Themes**: Tokyo Night, Catppuccin Mocha / Latte, Kanagawa, Rosé Pine, Gruvbox, One Dark, Dracula,
+  Nord, Nightfox and GitHub Light (menu with live preview); the console stays dark in every theme.
+- **Highlighting**: Verilog / SystemVerilog with template code shown as Python or Perl; `.svpy`, `.svpl`,
+  `.vpy` and `.vpl` templates are recognised.
+- **Projects**: `gen_dir` writes the generated RTL into a directory of the project.
+- **Wrap / hoist** work in modules that import packages. A wrapper now gets the parent's parameter types,
+  type parameters, typedefs and functions it needs (before, such names became `input logic` ports), and
+  keeps `signed` on its ports and nets. Undo works in a copied project.
+
 | Download | For |
 |---|---|
 | `rtl-integ-gui-*-windows-x86_64.zip` | Windows 10/11 |

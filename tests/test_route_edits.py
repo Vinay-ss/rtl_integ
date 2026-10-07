@@ -6,8 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from pyverilog_auto.integ import is_slang_available
 from pyverilog_auto.integ.design import Design
-from pyverilog_auto.integ.edits import EditError, EditSet, TextEdit, insert_list_entry, insert_lines_after
+from pyverilog_auto.integ.edits import (
+    EditError, EditSet, TextEdit, fence_spans_of, insert_list_entry, insert_lines_after,
+)
 from pyverilog_auto.integ.model import SrcRange
 
 
@@ -134,6 +137,51 @@ def test_overlap_and_fence_checks(tmp_path):
     es = EditSet(d)
     es.add(TextEdit(sf.key, 5, 5, "z"), TextEdit(sf.key, 5, 5, "w"))   # two insertions at one point are fine
     es.check()
+
+
+RESET_SRC = """\
+module r (input clk, input rst, output reg q);
+   always @(posedge clk) begin
+      if (rst) begin
+         /*AUTORESET*/
+         // Beginning of autoreset for uninitialized flops
+         q <= 1'h0;
+         // End of automatics
+      end
+      else begin
+         q <= ~q;
+      end
+   end
+endmodule
+"""
+
+
+@pytest.mark.parametrize("backend", [
+    "text",
+    pytest.param("slang", marks=pytest.mark.skipif(not is_slang_available(), reason="pyslang backend unavailable")),
+])
+def test_autoreset_block_is_a_fence(tmp_path, backend):
+    # AUTORESET opens with "// Beginning of autoreset ...", not "... automatic ..."
+    p = tmp_path / "r.v"
+    p.write_bytes(RESET_SRC.encode("utf-8"))
+    d = Design.from_files([str(p)], backend=backend)
+    sf = d.file(str(p))
+    mod = d.modules["r"]
+    (mi,) = mod.markers["AUTORESET"]
+    assert mi.fence_range is not None
+    fenced = sf.text[mi.fence_range.start:mi.fence_range.end]
+    assert fenced.lstrip().startswith("// Beginning of autoreset for uninitialized flops")
+    assert fenced.endswith("// End of automatics")
+    spans = {sf.key: fence_spans_of(mod)}
+    inside = sf.text.index("q <= 1'h0;")
+    es = EditSet(d)
+    es.add(TextEdit(sf.key, inside, inside, "x <= 1'b0;\n         ", description="in autoreset"))
+    with pytest.raises(EditError, match="AUTO fence"):
+        es.check(spans)
+    outside = sf.text.index("q <= ~q;")
+    es = EditSet(d)
+    es.add(TextEdit(sf.key, outside, outside, "x <= 1'b1;\n         ", description="hand-written branch"))
+    es.check(spans)
 
 
 def test_stale_file_detection(tmp_path):

@@ -18,7 +18,8 @@ from ..parser.sub_decls import _GATE_KEYWORDS
 from .model import AUTO_MODULE_REF_MARKERS, ConnStyle, MarkerInfo, ModuleKind, PinInfo, PortInfo, SrcRange
 from .sources import SourceFile
 
-# Markers that generate a "// Beginning of automatic ... // End of automatics" fence.
+# Markers that generate a "// Beginning of auto... // End of automatics" fence
+# ("automatic ..." for most, "autoreset for uninitialized flops" for AUTORESET).
 LINED_MARKERS = {
     "AUTOINPUT", "AUTOOUTPUT", "AUTOINOUT", "AUTOWIRE", "AUTOLOGIC", "AUTOREG", "AUTOREGINPUT",
     "AUTOTIEOFF", "AUTOUNUSED", "AUTORESET", "AUTOUNDEF", "AUTOASCIIENUM", "AUTOINOUTMODULE",
@@ -29,7 +30,7 @@ LINED_MARKERS = {
 PAREN_MARKERS = {"AUTOARG", "AUTOINST", "AUTOINSTPARAM", "AUTOSENSE", "AS", "AUTOCONCATWIDTH"}
 
 _MARKER_RE = re.compile(r"/\*\s*(AUTO[A-Za-z0-9_]+|AS)\b(.*?)\*/", re.S)
-_FENCE_BEGIN_RE = re.compile(r"^[ \t]*// Beginning of automatic", re.M)
+_FENCE_BEGIN_RE = re.compile(r"^[ \t]*// Beginning of auto", re.M)
 _FENCE_END_RE = re.compile(r"^[ \t]*// End of automatics[^\n]*", re.M)
 _IMPLICIT_STAR_RE = re.compile(r"^[^\n]*// Implicit \.\*[^\n]*$", re.M)
 _DOTSTAR_RE = re.compile(r"\.\*")

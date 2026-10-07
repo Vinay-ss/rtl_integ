@@ -1,0 +1,15 @@
+[project]
+top = "top"
+build_dir = "build"
+syntax = "backtick"
+
+[[template]]
+src = "tpl/top.svp"
+out = "top.sv"
+lang = "python"
+
+[[source]]
+path = "rtl/stage.sv"
+
+[gui.wrap]
+port_naming = "net"

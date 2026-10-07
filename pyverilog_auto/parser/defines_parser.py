@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 class DefinesParser:
-    """Extract ``\`define`` / ``\`undef`` / ``parameter`` values from Verilog sources."""
+    r"""Extract ``\`define`` / ``\`undef`` / ``parameter`` values from Verilog sources."""
 
     def __init__(self, config: "VerilogConfig") -> None:
         self._config = config
@@ -31,7 +31,7 @@ class DefinesParser:
         recurse: bool = True,
         visited: Optional[set[str]] = None,
     ) -> dict[str, str]:
-        """Scan *filepath* for ``\`define`` and ``\`include``.
+        r"""Scan *filepath* for ``\`define`` and ``\`include``.
 
         Return a defines dict.  Recursively processes ``\`include``
         files when *recurse* is ``True``.
@@ -73,7 +73,7 @@ class DefinesParser:
     def parse_buffer(
         self, buf: "VerilogBuffer", include_macros: bool = True
     ) -> dict[str, str]:
-        """Scan *buf* for ``\`define NAME VALUE`` lines.  Return ``{name: value}``.
+        r"""Scan *buf* for ``\`define NAME VALUE`` lines.  Return ``{name: value}``.
 
         When *include_macros* is ``False``, ``\`define`` / ``\`undef``
         directives are skipped and only ``parameter`` / ``localparam``
@@ -204,7 +204,7 @@ class DefinesParser:
         return defines
 
     def substitute(self, text: str, defines: dict[str, str]) -> str:
-        """Substitute ``\`NAME`` with its define value in *text*."""
+        r"""Substitute ``\`NAME`` with its define value in *text*."""
         if not defines:
             return text
         # Build a regex that matches `NAME for all defined names

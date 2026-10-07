@@ -1,0 +1,10 @@
+[project]
+top = "top"
+
+[[template]]
+src = "tpl/top.plv"
+out = "top.sv"
+lang = "perl"
+
+[[source]]
+path = "rtl/stage.sv"

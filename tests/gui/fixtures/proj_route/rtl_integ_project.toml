@@ -1,0 +1,30 @@
+# The routing demo of sample_env/route_demo as plain sources (no templates):
+# //auto_route annotations are collected and applied after AUTO expansion.
+[project]
+top = "top"
+route = "collect"
+libexts = [".sv", ".v"]
+
+[[source]]
+path = "src/axi_if.sv"
+
+[[source]]
+path = "src/leaf_c.sv"
+
+[[source]]
+path = "src/leaf_d.sv"
+
+[[source]]
+path = "src/leaf_e.sv"
+
+[[source]]
+path = "src/leaf_f.sv"
+
+[[source]]
+path = "src/core_a.sv"
+
+[[source]]
+path = "src/core_b.sv"
+
+[[source]]
+path = "src/top.v"

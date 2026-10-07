@@ -25,6 +25,49 @@ Optional extras: `pip install -e ".[integ]"` adds pyslang for the design
 integration commands (`hierarchy`, `integrate`, `route`); see
 [Design integration](#design-integration-filelist-hierarchy-leaf-first-expansion).
 
+## RTL integration GUI (rtl-integ-gui)
+
+A Neovim-based GUI on top of the integration commands: the instance hierarchy
+on the left, the module source on the right (the prepro template by default,
+or the generated RTL), and a console.  It restructures the design where it is
+written, in the templates: **wrap** marked sibling instances into a new
+wrapper module, **hoist** an instance out of its wrapper (in every copy of the
+wrapper), unroll template loops, with a diff preview, a connectivity check
+after every change, and undo.  Templates use prepro's syntax or the backtick
+syntax (`` ` CODE `` lines, `[*` ... `*]` blocks, `` `var` ``).
+
+**Download** a self-contained build from the
+[Releases](https://github.com/Vinay-ss/rtl_integ/releases) page; nothing else
+needs to be installed (Perl only for Perl templates):
+
+| File | For |
+|---|---|
+| `rtl-integ-gui-<ver>-windows-x86_64.zip` | Windows 10/11 |
+| `rtl-integ-gui-<ver>-linux-x86_64.tar.gz` | any x86_64 Linux with glibc 2.17+ (CentOS/RHEL 7 and later, Ubuntu 18.04+, Debian 10+, SUSE 15), no root needed |
+| `rtl-integ-gui-<ver>-1.x86_64.rpm`, `rtl-integ-gui_<ver>-1_amd64.deb` | the same, installed to `/opt/rtl-integ-gui` with `rtl-integ-gui` on PATH |
+
+```bash
+rtl-integ-gui --demo            # a copy of the demo project (rtl-integ-gui.cmd on Windows)
+rtl-integ-gui path/to/project   # a directory with rtl_integ_project.toml
+rtl-integ-gui --selftest        # check the installation
+```
+
+On Windows, unblock the downloaded zip (Properties, *Unblock*) before
+extracting it; the files are not code-signed.  The Neovide window needs a
+display and, on Linux, glibc 2.35+ and OpenGL; elsewhere (RHEL/CentOS 7-9,
+SSH sessions) the GUI runs in the terminal.
+
+Or install from source and bring your own Neovim (0.10+), on any OS:
+
+```bash
+pip install "pyverilog-auto[gui] @ git+https://github.com/Vinay-ss/rtl_integ"
+rtl-integ-gui --demo
+```
+
+The user guide (project file, keys, operations, template syntax) is
+[pyverilog_auto/gui/README.md](pyverilog_auto/gui/README.md); `prepro3` is
+the bundled Python 3 port of the prepro template preprocessor.
+
 ## CLI Usage
 
 ```

@@ -1,0 +1,15 @@
+[project]
+top = "top"
+
+[[template]]
+src = "tpl/top.svp"
+out = "top.sv"
+lang = "python"
+
+[[template]]
+src = "tpl/pair.svp"
+out = "pair.sv"
+lang = "python"
+
+[[source]]
+path = "rtl/stage.sv"

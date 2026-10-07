@@ -1,0 +1,13 @@
+// pair: two stages in a row (wrapper used twice by top)
+module pair #(parameter W = 8)
+  (input  logic         clk,
+   input  logic         rst_n,
+   input  logic [W-1:0] din,
+   output logic [W-1:0] dout);
+
+   logic [W-1:0] mid;
+
+   stage #(.W(W)) s0 (.clk(clk), .rst_n(rst_n), .d(din), .q(mid), .busy());
+
+   stage #(.W(W)) s1 (.clk(clk), .rst_n(rst_n), .d(mid), .q(dout), .busy());
+endmodule

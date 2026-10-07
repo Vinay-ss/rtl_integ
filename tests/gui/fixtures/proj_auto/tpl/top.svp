@@ -1,0 +1,17 @@
+// top: AUTO-style parent (non-ANSI, AUTOARG / AUTOWIRE / AUTOINST)
+module top (/*AUTOARG*/);
+   input        clk;
+   input        rst_n;
+   input  [7:0] din;
+   output [7:0] dout;
+
+   /*AUTOWIRE*/
+
+   ifc bus (.clk(clk));
+
+   prod u_p (/*AUTOINST*/);
+
+   cons u_q (/*AUTOINST*/);
+
+   sink u_s (/*AUTOINST*/);
+endmodule

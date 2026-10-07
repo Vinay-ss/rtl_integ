@@ -1,0 +1,10 @@
+[project]
+top = "top"
+
+[[template]]
+src = "tpl/top.svp"
+out = "top.sv"
+lang = "python"
+
+[[source]]
+path = "rtl/leaves.sv"

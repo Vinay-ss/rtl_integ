@@ -1,0 +1,13 @@
+// top: two copies of the same wrapper
+module top
+  (input  logic       clk,
+   input  logic       rst_n,
+   input  logic [7:0] a,
+   input  logic [7:0] b,
+   output logic [7:0] ya,
+   output logic [7:0] yb);
+
+   pair u_p0 (.clk(clk), .rst_n(rst_n), .din(a), .dout(ya));
+
+   pair u_p1 (.clk(clk), .rst_n(rst_n), .din(b), .dout(yb));
+endmodule

@@ -1,0 +1,30 @@
+Arguments after ++ (3): a b c
+Anything we print in the code ends up in the output
+
+loop begin
+  variable   substitution: first
+  embedded   substitution: firstone
+  expression substitution: first and another 1
+  expression substitution: begin first end
+  expression substitution: 1
+1 expression substitution: at the start of the first line.
+  variable   substitution: second
+  embedded   substitution: secondone
+  expression substitution: second and another 2
+  expression substitution: begin second end
+  expression substitution: 2
+2 expression substitution: at the start of the second line.
+  variable   substitution: third
+  embedded   substitution: thirdone
+  expression substitution: third and another 3
+  expression substitution: begin third end
+  expression substitution: 3
+3 expression substitution: at the start of the third line.
+loop end
+  expression substitution: InTheMiddle
+  expression substitution: > not padded! <
+  expression substitution: > left        <
+  expression substitution: >       right <
+  expression substitution: None None; Left left      ; Right       right;
+
+no substitutions $index \n 5'b0 "hello" $names[$index]

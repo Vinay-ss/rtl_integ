@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyverilog-auto"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.10"
 description = "Verilog AUTO code generation as a standalone Python tool"
 dependencies = []
@@ -16,15 +16,26 @@ dependencies = []
 integ = ["pyslang>=11,<12"]
 # Routes files are TOML; Python < 3.11 needs the tomli backport.
 routes-py310 = ["tomli; python_version < '3.11'"]
+# The Neovim GUI (rtl-integ-gui): TOML project files, structural edits need pyslang.
+gui = ["pyslang>=11,<12", "tomli; python_version < '3.11'"]
 
 [project.scripts]
 pyverilog-auto = "pyverilog_auto.cli:main"
+rtl-integ-gui = "pyverilog_auto.gui.launch:main"
+prepro3 = "pyverilog_auto.prepro.cli:main"
 
 [dependency-groups]
 dev = ["pytest", "pyslang>=11,<12"]
 
 [tool.setuptools.packages.find]
 include = ["pyverilog_auto*"]
+
+[tool.setuptools.package-data]
+"pyverilog_auto.gui" = [
+    "nvim/*.lua", "nvim/lua/rtl_integ/*.lua", "nvim/plugin/*.lua", "nvim/syntax/*.vim",
+    "examples/demo/*.toml", "examples/demo/tpl/*", "examples/demo/rtl/*",
+    "examples/demo_prepro/*.toml", "examples/demo_prepro/tpl/*", "examples/demo_prepro/rtl/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

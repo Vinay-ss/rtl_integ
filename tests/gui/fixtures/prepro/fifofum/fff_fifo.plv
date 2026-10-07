@@ -1,0 +1,1018 @@
+/*  fifofum - FIFO generator
+ *  Copyright (c) 2007 Adrian Lewis <indproj@yahoo.com>
+ *
+ *  This source code is free software; you can redistribute it
+ *  and/or modify it in source code form under the terms of the GNU
+ *  General Public License as published by the Free Software
+ *  Foundation; either version 2 of the License, or (at your option)
+ *  any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA
+ */
+
+/* pl-begin
+use fff;
+
+($spec, $gate) = fifo_args();
+($module, $store, $option, $depth_n, $width_b, $extras) = fifo_spec($spec);
+($width_r, $depth_v, $depth_b, $depth_r, $count_b, $count_r, $point_b, $point_r) = fifo_size($width_b, $depth_n);
+if ($gate eq '') { $clock_gate = "fff_gate"; }
+else             { $clock_gate = $gate; }
+pl-end */
+// FIFO specification: #[$store.$option.$depth_n."x".$width_b.$extras]#
+
+// pl # Synchronous FIFOs
+// pl if ($store ne 'as') {
+module #$module
+(
+  // WRITE PORT
+
+  input  >#$width_r> wr_data,
+  input              wr_valid,
+  output             wr_ready,
+  // pl if ($extras =~ /f/) {
+  output             wr_full,
+  // pl }
+  // pl if ($extras =~ /s/) {
+  output >#$count_r> wr_space,
+  // pl }
+
+  // READ PORT
+
+  output >#$width_r> rd_data,
+  output             rd_valid,
+  input              rd_ready,
+  // pl if ($extras =~ /e/) {
+  output             rd_empty,
+  // pl }
+  // pl if ($extras =~ /c/) {
+  output >#$count_r> rd_count,
+  // pl }
+
+  // pl if ($store eq 'dp') {
+  // DUAL-PORT MEMORY INTERFACE
+
+  output >#$depth_r> wp_address,
+  output             wp_write,
+  output >#$width_r> wp_data,
+
+  output >#$depth_r> rp_address,
+  output             rp_read,
+  input  >#$width_r> rp_data,
+
+  // pl }
+  // pl if ($store eq 'sp') {
+  // SINGLE-PORT MEMORY INTERFACE
+
+  output >#$depth_r> sp_address,
+  output             sp_access,
+  output             wp_write,
+  output >#$width_r> wp_data,
+  input  >#$width_r> rp_data,
+
+  // pl }
+  // pl if ($store eq 'ff' and $option eq 'lp') {
+  // SCAN MODE
+
+  input              scan_mode,
+
+  // pl }
+  // CLOCK AND RESET
+
+  input              clock,
+  input              reset_n
+);
+
+// INTERNAL SIGNALS
+
+  // WRITE POINTER
+
+  reg    >#$depth_r> n_wr_pointer;
+  reg    >#$depth_r> s_wr_pointer;
+ 
+  reg                n_wr_toggle;
+  reg                s_wr_toggle;
+
+  // READ POINTER
+ 
+  reg    >#$depth_r> n_rd_pointer;
+  reg    >#$depth_r> s_rd_pointer;
+
+  reg                n_rd_toggle;
+  reg                s_rd_toggle;
+
+  // pl if ($store eq 'dp' or $store eq 'sp') {
+  reg    >#$depth_r> n_p1_pointer;
+  reg    >#$depth_r> s_p1_pointer;
+  
+  reg                n_p1_toggle;
+  reg                s_p1_toggle;
+
+  // pl } 
+  // INTERFACE
+
+  reg                a_wr_ready;
+  reg                a_wr_write;
+
+  wire               n_wr_full;
+  reg                s_wr_full;
+  // pl if ($extras =~ /s/) {
+
+  reg    >#$count_r> n_wr_space;
+  reg    >#$count_r> s_wr_space;
+  // pl }
+
+  // pl if ($store eq 'ff') {
+  reg                a_rd_valid;
+  // pl } else {
+  reg                n_rd_valid;
+  reg                s_rd_valid;
+
+  // pl }
+  reg                a_rd_read;
+
+  wire               n_rd_empty;
+  reg                s_rd_empty;
+  // pl if ($extras =~ /c/) {
+
+  reg    >#$count_r> n_rd_count;
+  reg    >#$count_r> s_rd_count;
+  // pl }
+
+// IMPLEMENTATION
+
+  // FULL/EMPTY
+
+  assign n_wr_full  = n_rd_pointer == n_wr_pointer && n_wr_toggle != n_rd_toggle;
+  assign n_rd_empty = n_rd_pointer == n_wr_pointer && n_wr_toggle == n_rd_toggle;
+  // pl if ($extras =~ /c/) {
+
+  always@*
+    case({a_rd_read,a_wr_write})
+    2'b01:   n_rd_count = s_rd_count + 1;
+    2'b10:   n_rd_count = s_rd_count - 1;
+    default: n_rd_count = s_rd_count;
+    endcase
+  // pl }
+  // pl if ($extras =~ /s/) {
+
+  always@*
+    case({a_wr_write,a_rd_read})
+    2'b01:   n_wr_space = s_wr_space + 1;
+    2'b10:   n_wr_space = s_wr_space - 1;
+    default: n_wr_space = s_wr_space;
+    endcase
+  // pl }
+
+  // WRITE POINTER
+
+  always@*
+    begin
+      // pl if ($store eq 'sp' and $option eq 'rd') {
+      // READY WHEN FIFO EMPTY OR NOT FULL AND NOT READING
+
+      a_wr_ready = s_rd_empty || (!s_wr_full && !rd_ready);
+      // pl } else {
+      // pl if ($store eq 'ff' and $depth_n == 1) {
+      // READY WHEN FIFO NOT FULL OR READING
+
+      a_wr_ready = !s_wr_full || rd_ready;
+      // pl } else {
+      // READY WHEN FIFO NOT FULL
+
+      a_wr_ready = !s_wr_full;
+      // pl }}
+
+      // WRITE WHEN READY AND WRITE DATA IS VALID
+
+      a_wr_write = a_wr_ready && wr_valid;
+
+      // INCREMENT POINTER WHEN WRITING
+
+      if (a_wr_write)
+        begin
+          // IF POINTER MUST WRAP
+
+          if (s_wr_pointer == #[$depth_n-1]#)
+            begin
+              // WRAP POINTER
+
+              n_wr_pointer = 0;
+              n_wr_toggle  = !s_wr_toggle;
+            end
+          else
+            begin
+              // INCREMENT POINTER
+
+              n_wr_pointer = s_wr_pointer + 1;
+              n_wr_toggle  = s_wr_toggle;
+            end
+        end
+
+      // ELSE HOLD CURRENT VALUE
+
+      else
+        begin
+          n_wr_pointer = s_wr_pointer;
+          n_wr_toggle  = s_wr_toggle;
+        end
+    end
+
+  // READ POINTER
+
+  always@*
+    begin
+      // pl if ($store eq 'ff') {
+      // DATA VALID WHEN FIFO NOT EMPTY
+
+      a_rd_valid = !s_rd_empty;
+
+      // READ WHEN READY AND READ DATA IS READY
+
+      a_rd_read = a_rd_valid && rd_ready;
+      // pl } else {
+      // READ WHEN READY AND READ DATA IS READY
+
+      a_rd_read = s_rd_valid && rd_ready;
+      // pl }
+
+      // INCREMENT POINTER WHEN READING
+
+      if (a_rd_read)
+        begin
+          // pl if ($store eq 'dp' or $store eq 'sp') {
+          // SET CURRENT POINTER TO POINTER PLUS ONE
+
+          n_rd_pointer = s_p1_pointer;
+          n_rd_toggle  = s_p1_toggle;
+
+          // IF POINTER MUST WRAP
+
+          if (s_p1_pointer == #[$depth_n-1]#)
+            begin
+              // WRAP POINTER
+
+              n_p1_pointer = 0;
+              n_p1_toggle  = !s_p1_toggle;
+            end
+          else
+            begin
+              // INCREMENT POINTER
+
+              n_p1_pointer = s_p1_pointer + 1;
+              n_p1_toggle  = s_p1_toggle;
+            end
+          // pl } else {
+          // IF POINTER MUST WRAP
+
+          if (s_rd_pointer == #[$depth_n-1]#)
+            begin
+              // WRAP POINTER
+
+              n_rd_pointer = 0;
+              n_rd_toggle  = !s_rd_toggle;
+            end
+          else
+            begin
+              // INCREMENT POINTER
+
+              n_rd_pointer = s_rd_pointer + 1;
+              n_rd_toggle  = s_rd_toggle;
+            end
+          // pl }
+        end
+
+      // ELSE HOLD CURRENT VALUE
+
+      else
+        begin
+          n_rd_pointer = s_rd_pointer;
+          n_rd_toggle  = s_rd_toggle;
+          // pl if ($store eq 'dp' or $store eq 'sp') {
+
+          n_p1_pointer = s_p1_pointer;
+          n_p1_toggle  = s_p1_toggle;
+          // pl }
+        end
+
+      // pl if ($store eq 'dp') {
+      // DATA VALID WHEN FIFO NOT EMPTY
+
+      n_rd_valid = !(n_rd_pointer == s_wr_pointer && s_wr_toggle == n_rd_toggle);
+      // pl }
+      // pl if ($store eq 'sp') { 
+      // DATA VALID WHEN FIFO NOT EMPTY AND NOT WRITING
+
+      n_rd_valid = !(n_rd_pointer == s_wr_pointer && s_wr_toggle == n_rd_toggle) && !a_wr_write;
+      // pl }
+    end
+
+  // REGISTERS
+
+  always@(posedge clock or negedge reset_n)
+    if (!reset_n)
+      begin
+        s_wr_pointer <= #$depth_b'd0;
+        s_wr_toggle  <= 1'd0;
+        s_wr_full    <= 1'd0;
+        // pl if ($extras =~ /s/) {
+        s_wr_space   <= #$count_b'd#$depth_n;
+        // pl }
+
+        s_rd_pointer <= #$depth_b'd0;
+        s_rd_toggle  <= 1'd0;
+        // pl if ($store eq 'dp' or $store eq 'sp') {
+        s_p1_pointer <= #$depth_b'd1;
+        s_p1_toggle  <= 1'd0;
+        // pl }
+        s_rd_empty   <= 1'd1;
+        // pl if ($extras =~ /c/) {
+        s_rd_count   <= #$count_b'd0;
+        // pl }
+        // pl if ($store ne 'ff') {
+        s_rd_valid   <= 1'd0;
+        // pl }
+      end
+    else
+      begin
+        s_wr_pointer <= n_wr_pointer;
+        s_wr_toggle  <= n_wr_toggle;
+        s_wr_full    <= n_wr_full;
+        // pl if ($extras =~ /s/) {
+        s_wr_space   <= n_wr_space;
+        // pl }
+
+        s_rd_pointer <= n_rd_pointer;
+        s_rd_toggle  <= n_rd_toggle;
+        // pl if ($store eq 'dp' or $store eq 'sp') {
+        s_p1_pointer <= n_p1_pointer;
+        s_p1_toggle  <= n_p1_toggle;
+        // pl }
+        s_rd_empty   <= n_rd_empty;
+        // pl if ($extras =~ /c/) {
+        s_rd_count   <= n_rd_count;
+        // pl }
+        // pl if ($store ne 'ff') {
+        s_rd_valid   <= n_rd_valid;
+        // pl }
+      end
+
+  // pl if ($store eq 'ff') {
+  // FIFO ENTRIES
+
+  #$module#_storage u_#$module#_storage
+  (
+    .clock      (clock),
+    // pl if ($option eq 'lp') {
+    .scan_mode  (scan_mode),
+    // pl }
+
+    .wr_address (s_wr_pointer),
+    .wr_data    (wr_data),
+    .wr_write   (a_wr_write),
+
+    .rd_address (s_rd_pointer),
+    .rd_data    (rd_data)
+  );
+  // pl }
+  // pl if ($store eq 'dp') {
+  // ENTRY ACCESS
+
+  assign wp_address = s_wr_pointer;
+  assign wp_write   = a_wr_write;
+  assign wp_data    = wr_data;
+
+  assign rp_address = n_rd_pointer;
+  assign rp_read    = n_rd_valid;
+  // pl }
+  // pl if ($store eq 'sp') {
+  // ENTRY ACCESS
+
+  assign sp_address = a_wr_write ? s_wr_pointer : n_rd_pointer;
+  assign sp_access  = a_wr_write || n_rd_valid;
+  assign wp_write   = a_wr_write;
+  assign wp_data    = wr_data;
+  // pl }
+
+  // ASSIGN OUTPUTS
+
+  assign wr_ready   = a_wr_ready;
+  // pl if ($extras =~ /f/) {
+  assign wr_full    = s_wr_full;
+  // pl }
+  // pl if ($extras =~ /s/) {
+  assign wr_space   = s_wr_space;
+  // pl }
+
+  // pl if ($store eq 'ff') {
+  assign rd_valid   = a_rd_valid;
+  // pl } else {
+  assign rd_valid   = s_rd_valid;
+  assign rd_data    = rp_data;
+  // pl }
+  // pl if ($extras =~ /e/) {
+  assign rd_empty   = s_rd_empty;
+  // pl }
+  // pl if ($extras =~ /c/) {
+  assign rd_count   = s_rd_count;
+  // pl }
+
+endmodule
+// pl }
+// pl # Asynchronous FIFO
+// pl if ($store eq 'as') {
+module #$module
+(
+  // pl if ($option eq 'lp') {
+  // SCAN CONTROL
+
+  input              scan_mode,
+
+  // pl }
+  // WRITE PORT
+
+  input              wr_clock,
+  input              wr_reset_n,
+  // pl if ($extras =~ /w/) {
+  input              wr_reset,
+  // pl }
+  // pl if ($extras =~ /f/) {
+  output             wr_full,
+  // pl }
+  // pl if ($extras =~ /s/) {
+  output >#$count_r> wr_space,
+  // pl }
+  output             wr_ready,
+  input              wr_valid,
+  input  >#$width_r> wr_data,
+
+  // READ INTERFACE
+
+  input              rd_clock,
+  input              rd_reset_n,
+  // pl if ($extras =~ /r/) {
+  input              rd_reset,
+  // pl }
+  // pl if ($extras =~ /e/) {
+  output             rd_empty,
+  // pl }
+  // pl if ($extras =~ /c/) {
+  output >#$count_r> rd_count,
+  // pl }
+  input              rd_ready,
+  output             rd_valid,
+  output >#$width_r> rd_data
+);
+
+// INTERNAL SIGNALS
+
+  wire   >#$point_r> wr_rd_gray;
+  wire   >#$point_r> rd_wr_gray;
+  // pl if ($extras =~ /w/) {
+  wire               wr_rd_reset;
+  // pl }
+  // pl if ($extras =~ /r/) {
+  wire               rd_wr_reset;
+  // pl }
+
+  wire               wr_access;
+  wire   >#$depth_r> wr_address;
+  wire   >#$depth_r> rd_address;
+
+// IMPLEMENTATION
+
+  // WRITE POINTER
+
+  #$module#_count_wr u_#$module#_count_wr
+  (
+    // CLOCK AND RESET
+  
+    .clock         (wr_clock),
+    .reset_n       (wr_reset_n),
+    // pl if ($extras =~ /w/) {
+    .reset         (wr_reset),
+    // pl }
+  
+    // LOCAL INTERFACE
+  
+    .request       (wr_valid),
+    .valid         (wr_ready),
+    .access        (wr_access),
+    .address       (wr_address),
+    // pl   if ($extras =~ /s/) {
+    .space         (wr_space),
+    // pl   }
+    // pl   if ($extras =~ /f/) {
+    .full          (wr_full),
+    // pl   }
+  
+    // CROSS DOMAIN INTERFACE
+  
+    // pl if ($extras =~ /r/) {
+    .reset_in      (rd_wr_reset),
+    // pl }
+    // pl if ($extras =~ /w/) {
+    .reset_out     (wr_rd_reset),
+    // pl }
+    .gray_in       (rd_wr_gray),
+    .gray_out      (wr_rd_gray)
+  );
+
+  // READ POINTER
+
+  #$module#_count_rd u_#$module#_count_rd
+  (
+    // CLOCK AND RESET
+  
+    .clock         (rd_clock),
+    .reset_n       (rd_reset_n),
+    // pl if ($extras =~ /r/) {
+    .reset         (rd_reset),
+    // pl }
+  
+    // LOCAL INTERFACE
+  
+    .request       (rd_ready),
+    .valid         (rd_valid),
+    .address       (rd_address),
+    // pl   if ($extras =~ /c/) {
+    .count         (rd_count),
+    // pl   }
+    // pl   if ($extras =~ /e/) {
+    .empty         (rd_empty),
+    // pl   }
+  
+    // CROSS DOMAIN INTERFACE
+  
+    // pl if ($extras =~ /w/) {
+    .reset_in      (wr_rd_reset),
+    // pl }
+    // pl if ($extras =~ /r/) {
+    .reset_out     (rd_wr_reset),
+    // pl }
+    .gray_in       (wr_rd_gray),
+    .gray_out      (rd_wr_gray)
+  );
+
+  // FIFO ENTRIES
+
+  #$module#_storage u_#$module#_storage
+  (
+    .clock      (wr_clock),
+    // pl if ($option eq 'lp') {
+    .scan_mode  (scan_mode),
+    // pl }
+
+    .wr_address (wr_address),
+    .wr_data    (wr_data),
+    .wr_write   (wr_access),
+
+    .rd_address (rd_address),
+    .rd_data    (rd_data)
+  );
+
+endmodule
+// pl foreach $op (0..1) {
+// pl   $fix        = ('wr', 'rd')[$op];
+// pl   $my_reset   = ('w', 'r')[$op];
+// pl   $your_reset = ('r', 'w')[$op];
+
+module #$module#_count_#$fix
+(
+  // CLOCK AND RESET
+
+  input              clock,
+  input              reset_n,
+  // pl if ($extras =~ /$my_reset/) {
+  input              reset,
+  // pl }
+
+  // LOCAL INTERFACE
+
+  input              request,
+  output             valid,
+  output             access,
+  output >#$depth_r> address,
+  // pl if ($fix eq 'wr') {
+  // pl   if ($extras =~ /s/) {
+  output >#$count_r> space,
+  // pl   }
+  // pl   if ($extras =~ /f/) {
+  output             full,
+  // pl   }
+  // pl } else {
+  // pl   if ($extras =~ /c/) {
+  output >#$count_r> count,
+  // pl   }
+  // pl   if ($extras =~ /e/) {
+  output             empty,
+  // pl   }
+  // pl }
+
+  // CROSS DOMAIN INTERFACE
+
+  // pl if ($extras =~ /$your_reset/) {
+  input              reset_in,
+  // pl }
+  // pl if ($extras =~ /$my_reset/) {
+  output             reset_out,
+  // pl }
+  input  >#$point_r> gray_in,
+  output >#$point_r> gray_out
+);
+
+// INTERNAL SIGNALS
+
+  // pl if ($extras =~ /$your_reset/) {
+  reg                s0_reset_in;
+  reg                s1_reset_in;
+  // pl }
+  // pl if ($extras =~ /$your_reset/ or $extras =~ /$my_reset/) {
+  reg                n2_reset_in;
+  reg                s2_reset_in;
+
+  // pl }
+  reg    >#$point_r> s0_gray_in;
+  reg    >#$point_r> s1_gray_in;
+
+  reg    >#$point_r> n_pointer_in;
+  reg    >#$point_r> s_pointer_in;
+
+  reg    >#$point_r> n_pointer_out;
+  reg    >#$point_r> s_pointer_out;
+
+  reg    >#$point_r> n_gray_out;
+  reg    >#$point_r> s_gray_out;
+
+  // pl if ($extras =~ /$my_reset/) {
+  reg                s_reset_out;
+
+  // pl }
+  reg                n_valid;
+  reg                s_valid;
+
+  reg                a_access;
+
+  // pl if ($fix eq 'wr') {
+  // pl   if ($extras =~ /s/) {
+  reg    >#$count_r> n_space;
+  reg    >#$count_r> s_space;
+  // pl   }
+  // pl   if ($extras =~ /f/) {
+  reg                n_full;
+  reg                s_full;
+  // pl   }
+  // pl } else {
+  // pl   if ($extras =~ /c/) {
+  reg    >#$count_r> n_count;
+  reg    >#$count_r> s_count;
+  // pl   }
+  // pl   if ($extras =~ /e/) {
+  reg                n_empty;
+  reg                s_empty;
+  // pl   }
+  // pl }
+
+// IMPLEMENTATION
+
+  // FUNCTION: CONVERT GRAY-CODE TO BINARY
+
+  function <#$point_r> gray_to_binary;
+
+  // INTERFACE
+
+  input >#$point_r> gray;
+
+  // INTERNAL SIGNALS
+
+  integer           icnt;
+ 
+  // IMPLEMENTATION
+
+  begin
+    gray_to_binary[#$depth_b] = gray[#$depth_b];
+    for(icnt = #$depth_b; icnt > 0; icnt = icnt - 1)
+      gray_to_binary[icnt-1] = gray[icnt-1] ^ gray_to_binary[icnt];
+  end
+  endfunction
+
+  // FUNCTION: CONVERT BINARY TO GRAY-CODE
+
+  function <#$point_r> binary_to_gray;
+
+  // INTERFACE
+
+  input >#$point_r> binary;
+ 
+  // IMPLEMENTATION
+
+  begin
+    binary_to_gray = binary ^ {1'b0, binary[#$depth_b:1]};
+  end
+  endfunction
+
+  // DOUBLE SYNC INCOMING GRAY COUNT
+
+  always@(posedge clock or negedge reset_n)
+    if (!reset_n)
+      begin
+        s0_gray_in <= 'b0;
+        s1_gray_in <= 'b0;
+      end
+    else
+      begin
+        s0_gray_in <= gray_in;
+        s1_gray_in <= s0_gray_in;
+      end
+
+  // pl if ($extras =~ /$your_reset/ or $extras =~ /$my_reset/) {
+  // DOUBLE SYNC INCOMING RESET; ADD PIPELINE STAGE
+
+  always@(posedge clock or negedge reset_n)
+    if (!reset_n)
+      begin
+        // pl if ($extras =~ /$your_reset/) {
+        s0_reset_in <= 1'b0;
+        s1_reset_in <= 1'b0;
+        // pl }
+        s2_reset_in <= 1'b0;
+      end
+    else
+      begin
+        // pl if ($extras =~ /$your_reset/) {
+        s0_reset_in <= reset_in;
+        s1_reset_in <= s0_reset_in;
+        // pl }
+        s2_reset_in <= n2_reset_in;
+      end
+
+  // pl }
+  // GRAY COUNTER
+
+  always@*
+    begin
+      // AN ACCESS OCCURS WHEN REQUEST AND VALID ARE BOTH ASSERTED
+
+      a_access = request && s_valid;
+
+      // INCREMENT IF NECESSARY
+
+      if (a_access)
+        n_pointer_out = s_pointer_out + 1;
+      else
+        n_pointer_out = s_pointer_out;
+
+      // CONVERT NEXT POINTER VALUE TO GRAY-CODE
+
+      n_gray_out = binary_to_gray(n_pointer_out);
+      // pl if ($extras =~ /$your_reset/ or $extras =~ /$my_reset/) {
+
+      // ZERO POINTER WHEN IN RESET
+
+      if (s2_reset_in)
+        begin
+          n_gray_out    = 0;
+          n_pointer_out = 0;
+        end
+      // pl }
+
+      // CONVERT GRAY-CODED COUNTER INTO BINARY
+
+      // pl if ($extras =~ /$my_reset/) {
+      n_pointer_in = gray_to_binary(reset ? 0 : s1_gray_in);
+      // pl } else {
+      n_pointer_in = gray_to_binary(s1_gray_in);
+      // pl }
+
+      // VALID WHEN FIFO HAS DATA/SPACE 
+
+      // pl if ($fix eq 'wr') {
+      n_valid = n_pointer_out<#$depth_r> != n_pointer_in<#$depth_r>
+             || n_pointer_out[#$depth_b] == n_pointer_in[#$depth_b];
+      // pl   if ($extras =~ /s/) {
+      n_space = #$count_b#'d#$depth_n - n_pointer_out + n_pointer_in;
+      // pl   }
+      // pl   if ($extras =~ /f/) {
+      n_full  = !n_valid;
+      // pl   }
+      // pl } else {
+      n_valid = n_pointer_out != n_pointer_in;
+      // pl   if ($extras =~ /c/) {
+      n_count = n_pointer_in - n_pointer_out;
+      // pl   }
+      // pl   if ($extras =~ /e/) {
+      n_empty = !n_valid;
+      // pl   }
+      // pl }
+
+      // pl if ($extras =~ /$your_reset/ or $extras =~ /$my_reset/) {
+      // GENERATE SOFT RESET
+
+      // pl if ($extras =~ /$my_reset/) {
+      // pl   if ($extras =~ /$your_reset/) {
+      n2_reset_in = reset || s1_reset_in;
+      // pl   } else {
+      n2_reset_in = reset;
+      // pl   }
+      // pl } else {
+      n2_reset_in = s1_reset_in;
+      // pl }
+
+      // INVALIDATE WHEN IN RESET
+
+      if (n2_reset_in)
+        begin
+          n_valid = 1'b0;
+          // pl if ($fix eq 'wr') {
+          // pl   if ($extras =~ /s/) {
+          n_space = #$count_b#'d#$depth_n;
+          // pl   }
+          // pl   if ($extras =~ /f/) {
+          n_full  = 1'b0;
+          // pl   }
+          // pl } else {
+          // pl   if ($extras =~ /c/) {
+          n_count = #$count_b#'d0;
+          // pl   }
+          // pl   if ($extras =~ /e/) {
+          n_empty = 1'b1;
+          // pl   }
+          // pl }
+        end
+
+      // pl }
+    end
+
+  // OUTPUT REGISTERS
+
+  always@(posedge clock or negedge reset_n)
+    if (!reset_n)
+      begin
+        s_pointer_in  <= #$point_b'd0;
+        s_pointer_out <= #$point_b'd0;
+        s_gray_out    <= #$point_b'd0;
+        // pl if ($extras =~ /$my_reset/) {
+        s_reset_out   <= 1'b0;
+        // pl }
+        s_valid       <= 1'b0;
+        // pl if ($fix eq 'wr') {
+        // pl   if ($extras =~ /s/) {
+        s_space       <= #$count_b#'d#$depth_n;
+        // pl   }
+        // pl   if ($extras =~ /f/) {
+        s_full        <= 1'b0;
+        // pl   }
+        // pl } else {
+        // pl   if ($extras =~ /c/) {
+        s_count       <= #$count_b#'d0;
+        // pl   }
+        // pl   if ($extras =~ /e/) {
+        s_empty       <= 1'b1;
+        // pl   }
+        // pl }
+      end
+    else
+      begin
+        s_pointer_in  <= n_pointer_in;
+        s_pointer_out <= n_pointer_out;
+        s_gray_out    <= n_gray_out;
+        // pl if ($extras =~ /$my_reset/) {
+        s_reset_out   <= reset;
+        // pl }
+        s_valid       <= n_valid;
+        // pl if ($fix eq 'wr') {
+        // pl   if ($extras =~ /s/) {
+        s_space       <= n_space;
+        // pl   }
+        // pl   if ($extras =~ /f/) {
+        s_full        <= n_full;
+        // pl   }
+        // pl } else {
+        // pl   if ($extras =~ /c/) {
+        s_count       <= n_count;
+        // pl   }
+        // pl   if ($extras =~ /e/) {
+        s_empty       <= n_empty;
+        // pl   }
+        // pl }
+      end
+
+  // ASSIGN OUTPUTS
+
+  assign gray_out  = s_gray_out;
+  // pl if ($extras =~ /$my_reset/) {
+  assign reset_out = s_reset_out;
+  // pl }
+  assign address   = s_pointer_out<#$depth_r>;
+  assign valid     = s_valid;
+  assign access    = a_access;
+  // pl if ($fix eq 'wr') {
+  // pl   if ($extras =~ /s/) {
+  assign space     = s_space;
+  // pl   }
+  // pl   if ($extras =~ /f/) {
+  assign full      = s_full;
+  // pl   }
+  // pl } else {
+  // pl   if ($extras =~ /c/) {
+  assign count     = s_count;
+  // pl   }
+  // pl   if ($extras =~ /e/) {
+  assign empty     = s_empty;
+  // pl   }
+  // pl }
+
+endmodule
+// pl }
+// pl }
+// pl # FIFO entry storage
+// pl if ($store eq 'ff' or $store eq 'as') {
+
+module #$module#_storage
+(
+  input              clock,
+  // pl if ($option eq 'lp') {
+  input              scan_mode,
+  // pl }
+  
+  input  >#$depth_r> wr_address,
+  input  >#$width_r> wr_data,
+  input              wr_write,
+
+  input  >#$depth_r> rd_address,
+  output >#$width_r> rd_data
+);
+
+// INTERNAL SIGNALS
+
+  // FIFO ENTRIES
+
+  // pl if ($option eq 'lp') {
+  // pl   for $entry (0 .. $depth_n-1) {
+  wire               a_clock_#$entry;
+  reg                a_write_#$entry;
+  reg    >#$width_r> s_entry_#$entry;
+  // pl   }
+  // pl } else {
+  reg    >#$width_r> m_entry <#$depth_v>;
+  // pl }
+
+// IMPLEMENTATION
+
+  // pl if ($option eq 'lp') {
+  reg   >#$width_r> rd_data;
+
+  always@*
+    begin
+      // pl for $entry (0 .. $depth_n-1) {
+      a_write_#$entry = scan_mode;
+      // pl }
+
+      case (wr_address)
+      // pl for $entry (0 .. $depth_n-1) {
+      #$entry: a_write_#$entry = wr_write | scan_mode;
+      // pl }
+      endcase
+
+      case (rd_address)
+      // pl for $entry (0 .. $depth_n-1) {
+      #$entry: rd_data = s_entry_#$entry;
+      // pl }
+      endcase
+    end
+  // pl for $entry (0 .. $depth_n-1) {
+
+  #$clock_gate u_#$clock_gate#_#$entry (.in(clock), .out(a_clock_#$entry), .enable(a_write_#$entry));
+  always@(posedge a_clock_#$entry) s_entry_#$entry <= wr_data;
+  // pl }
+  // pl } else {
+  always@(posedge clock)
+      if (wr_write) m_entry[wr_address] <= wr_data;
+
+  assign rd_data = m_entry[rd_address];
+  // pl }
+
+endmodule
+// pl if ($option eq 'lp' and $gate eq '') {
+
+module fff_gate
+(
+  input  in,
+  output out,
+  input  enable
+);
+
+  reg out;
+
+  always@*
+    if (enable) out = in;
+
+endmodule
+// pl }}

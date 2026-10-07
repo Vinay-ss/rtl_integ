@@ -1,0 +1,28 @@
+/* py-begin
+import sys
+print("Arguments after ++ ("+str(len(sys.argv)-1)+"): "+" ".join(sys.argv[1:]))
+# Lets set up a list of names
+names = ['first', 'second', 'third']
+
+# Anything we print ends up in the output
+print("Anything we print in the code ends up in the output")
+py-end */
+
+loop begin
+// py for index in range(0,3): # comments are OK
+// py   name = names[index]
+  variable   substitution: #$name
+  embedded   substitution: #$name#one
+  expression substitution: #[names[index]]# and another #[1+index]#
+  expression substitution: #["begin "+name+' end']#
+  expression substitution: #[1+index]#
+#[1+index]# expression substitution: at the start of the #[names[index]]# line.
+// py # Must have a preprocessor line to end the loop
+loop end
+  expression substitution: In#['The']#Middle
+  expression substitution: > #['not padded!']# <
+  expression substitution: > #<'left' <# <
+  expression substitution: > #>'right'># <
+  expression substitution: None #['None']#; Left #<'left'<#; Right #>'right'>#;
+
+no substitutions $index \n 5'b0 "hello" $names[$index]

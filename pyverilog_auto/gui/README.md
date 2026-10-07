@@ -174,10 +174,15 @@ Options (`vim.g.rtl_integ_config` before the plugin loads): `tree_width`,
 
 **Wrap** (mark siblings, `W`): names used outside the selection, and ports of
 the parent, become wrapper ports; names used only inside become internal nets;
-parameters are forwarded.  Template text moves verbatim, so tokens,
-`/*AUTOINST*/` and template blocks stay live.  Template variables are carried
-(bound to the parent's values) or, when that is not possible, frozen on
-request.  Outputs that drive only part of an outside net get their own port.
+parameters are forwarded (with their types).  Typedefs and type parameters of
+the parent that the moved text or the wrapper's ports and nets use become
+`parameter type`s of the wrapper, set by the parent to its own types; package
+names come through the parent's imports; local functions are copied.  A value
+of an enum declared in the parent is refused (move the enum into a package).
+Template text moves verbatim, so tokens, `/*AUTOINST*/` and template blocks
+stay live.  Template variables are carried (bound to the parent's values) or,
+when that is not possible, frozen on request.  Outputs that drive only part of
+an outside net get their own port.
 Port naming: `net` (port = parent net name) or `inst_port` (`<inst>_<port>`).
 
 **Hoist** (`H` on an instance inside a wrapper): applies to every instance of

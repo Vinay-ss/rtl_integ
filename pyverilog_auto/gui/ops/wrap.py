@@ -5,7 +5,9 @@ For instances S of parent module P the plan
 1. finds every local name S uses (pins and parameter overrides);
 2. turns each name into a wrapper port (used outside S, or a port or
    interface of P), an internal net (declaration moves into the wrapper), or
-   a forwarded parameter;
+   a forwarded parameter; the parameters, typedefs and functions of P that S
+   or the wrapper's declarations need come along (a typedef becomes a type
+   parameter the parent sets to its own type; a function is copied);
 3. writes a new wrapper template containing S's template text verbatim
    (tokens, blocks and ``/*AUTOINST*/`` survive and expand at the next build);
 4. replaces S in P's template by one instance of the wrapper, deletes the
@@ -76,21 +78,48 @@ def _fmt_ports(ports: list[WPort]) -> list[str]:
     return out
 
 
-def _wrapper_text(module: str, origin: str, params: list[tuple[str, str]], ports: list[WPort],
+def _reindent(text: str, col: int, indent: str) -> str:
+    """Move the continuation lines of *text* (written at column *col*) to *indent*."""
+    lines = text.split("\n")
+    out = [lines[0]]
+    for ln in lines[1:]:
+        lead = len(ln) - len(ln.lstrip(" \t"))
+        out.append((indent + ln[min(lead, col):]).rstrip() if ln.strip() else "")
+    return "\n".join(out)
+
+
+def _column(text: str, off: int) -> int:
+    return off - (text.rfind("\n", 0, off) + 1)
+
+
+def _param_line(d: Decl, col: int) -> str:
+    """Wrapper parameter for a parameter or typedef of the parent (declared at
+    column *col*); typedefs become type parameters so the parent can pass its
+    own type."""
+    if d.kind == "typedef" or d.is_type:
+        line = f"parameter type {d.name} = {d.value or 'logic'}"
+    else:
+        line = f"parameter {f'{d.type_text} {d.name}'.strip()} = {d.value if d.value is not None else '0'}"
+    return _reindent(line, col, "    ")
+
+
+def _wrapper_text(module: str, origin: str, params: list[str], ports: list[WPort],
                   internal: list[str], aliases: list[str], bodies: list[list[str]], indent: str,
-                  imports: list[str] = ()) -> str:
+                  imports: list[str] = (), functions: list[str] = ()) -> str:
     lines = [f"// {module}: wrapper created by rtl-integ-gui from {origin}", f"module {module}"]
     if imports:
         lines.append("  import " + ", ".join(imports) + ";")
     if params:
-        plines = [f"parameter {n} = {v}" for n, v in params]
-        lines.append("  #(" + (",\n    ".join(plines)) + ")")
+        lines.append("  #(" + (",\n    ".join(params)) + ")")
     plist = _fmt_ports(ports)
     if plist:
         lines.append("  (" + (",\n   ".join(plist)) + ");")
     else:
         lines.append("  ();")
     lines.append("")
+    for text in functions:
+        lines.append(indent + text)
+        lines.append("")
     if internal:
         lines.extend(indent + s for s in internal)
         lines.append("")
@@ -381,16 +410,28 @@ class WrapPlanner:
                     if n not in names:
                         names.append(n)
 
+        # parameters, types and functions of P the wrapper needs a copy of, each after what it uses
         params: list[str] = []
+        visiting: set[str] = set()
 
         def add_param(n: str) -> None:
-            if n in params:
+            if n in params or n in visiting or ix.is_imported(n):
                 return
             d = ix.decls.get(n)
-            if d is None or d.kind not in ("param", "localparam"):
+            if d is None:
                 return
-            for dep in identifiers(d.value or ""):
+            if d.kind == "enumval":
+                self._fail("E_WRAP_ENUM", f"{n} is a value of the enum {d.value} declared in {ix.module.name}; "
+                                          "declare that enum in a package to wrap instances that use it")
+            if d.kind == "typedef" and d.unpacked:
+                self._fail("E_WRAP_TYPE", f"typedef {n} has unpacked dimensions {d.unpacked}; declare it in a "
+                                          "package to wrap instances that use it")
+            if d.kind not in ("param", "localparam", "typedef", "function"):
+                return
+            visiting.add(n)
+            for dep in d.refs:
                 add_param(dep)
+            visiting.discard(n)
             params.append(n)
 
         ports: list[WPort] = list(expr_ports)
@@ -399,10 +440,10 @@ class WrapPlanner:
             if ix.is_imported(n):
                 continue        # a package's type, parameter or enum value: the wrapper imports it too
             d = ix.decls.get(n)
-            if d is not None and d.kind in ("param", "localparam"):
+            if d is not None and d.kind in ("param", "localparam", "typedef", "function", "enumval"):
                 add_param(n)
                 continue
-            if d is not None and d.kind in ("typedef", "genvar"):
+            if d is not None and d.kind == "genvar":
                 self._fail("E_WRAP_TYPE", f"{n} is a {d.kind}; wrapping it is not supported")
             pins = [(u, p) for u in uses for p in u.pins if n in p.names]
             dirs = {p.direction for _u, p in pins}
@@ -410,7 +451,7 @@ class WrapPlanner:
                 or any(self._child_port_is_iface(u, p.port) for u, p in pins)
             external = (d is not None and d.kind in ("port", "iface_inst")) or ix.used_outside(n, owners)
             type_text, dims, unpacked = self._type_of(n, d, pins, uses)
-            for t in identifiers(dims) + identifiers(unpacked):
+            for t in identifiers(type_text) + identifiers(dims) + identifiers(unpacked):
                 add_param(t)
             if not external:
                 if is_iface:
@@ -610,10 +651,14 @@ class WrapPlanner:
         else:
             entry = SourceEntry(path=wpath, out=wout, created_by_gui=True)
 
-        param_vals = []
-        for p in params:
-            d = ix.decls[p]
-            param_vals.append((p, d.value if d.value is not None else "0"))
+        functions = [p for p in params if ix.decls[p].kind == "function"]
+        params = [p for p in params if p not in functions]
+        param_lines = [_param_line(ix.decls[p], _column(ix.text, ix.decls[p].start)) for p in params]
+        func_texts = [_reindent(ix.text[ix.decls[f].start:ix.decls[f].end], _column(ix.text, ix.decls[f].start),
+                                indent) for f in functions]
+        if functions:
+            plan.note("N_COPIED", f"copied into {self.module} from {P.name} (edit both copies from now on): "
+                      + ", ".join(f"function {f}" for f in functions))
         decl_lines = [text for _n, _d, text in internal]
         alias_lines = []
         for p in ports:
@@ -624,8 +669,8 @@ class WrapPlanner:
                 else:
                     alias_lines.append(f"assign {p.name} = {p.net};")
         origin = f"{P.name} ({proj.rel(template)})"
-        wtext = _wrapper_text(self.module, origin, param_vals, ports, decl_lines, alias_lines, bodies, indent,
-                              ix.imports)
+        wtext = _wrapper_text(self.module, origin, param_lines, ports, decl_lines, alias_lines, bodies, indent,
+                              ix.imports, func_texts)
         edits.add_file(wpath, wtext)
         with open(proj.path, "r", encoding="utf-8", newline="") as fh:
             manifest = fh.read()
@@ -666,8 +711,14 @@ class WrapPlanner:
         if any(p.iface for p in ports):
             plan.summary_lines.append("  ifaces:   " + ", ".join(p.name for p in ports if p.iface))
         plan.summary_lines.append("  internal: " + (", ".join(n for n, _d, _t in internal) or "-"))
-        if params:
-            plan.summary_lines.append("  params:   " + ", ".join(params))
+        values = [p for p in params if ix.decls[p].kind != "typedef" and not ix.decls[p].is_type]
+        types = [p for p in params if p not in values]
+        if values:
+            plan.summary_lines.append("  params:   " + ", ".join(values))
+        if types:
+            plan.summary_lines.append("  types:    " + ", ".join(types))
+        if functions:
+            plan.summary_lines.append("  copied:   " + ", ".join(functions))
         if inside_guard:
             plan.summary_lines.append(f"  the wrapper instance stays inside the template if at line "
                                       f"{stmts[0].guards[-1].start}")

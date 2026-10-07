@@ -152,11 +152,13 @@ class HoistPlanner:
             d = ixW.decls.get(n)
             if ixW.is_imported(n):
                 pkg_used.append(n)
+            elif d is not None and d.is_type:
+                self._fail("E_HOIST_TYPE_PARAM", f"{X.name} uses type parameter {n} of {W.name}")
             elif d is not None and d.kind in ("param", "localparam"):
                 params.append(n)
             elif d is not None and d.kind == "port":
                 ports.append(n)
-            elif d is not None and d.kind in ("iface_inst", "typedef", "genvar"):
+            elif d is not None and d.kind in ("iface_inst", "typedef", "genvar", "function", "enumval"):
                 self._fail("E_HOIST_" + d.kind.upper(), f"{X.name} uses {d.kind} {n} of {W.name}")
             elif ixW.used_outside(n, own):
                 shared.append(n)

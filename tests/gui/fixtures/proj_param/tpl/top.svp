@@ -1,0 +1,19 @@
+module top (
+  input  logic              t_clk,
+  input  logic signed [5:0] t_s,
+  input  logic [5:0]        t_a,
+  output logic signed [6:0] t_sum,
+  output logic [5:0]        t_y,
+  output logic [5:0]        t_lvl
+);
+
+  blk #(.W(6), .N(3)) u_blk (
+    .clk  (t_clk),
+    .sdin (t_s),
+    .tin  (t_a),
+    .sum  (t_sum),
+    .y    (t_y),
+    .lvl  (t_lvl)
+  );
+
+endmodule

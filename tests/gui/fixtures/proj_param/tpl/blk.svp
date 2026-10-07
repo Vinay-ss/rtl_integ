@@ -1,0 +1,50 @@
+// blk declares its own parameters, type parameters, a localparam, a struct
+// typedef, an enum and a function; its instances use all of them
+module blk #(
+  parameter int  W = 8,
+  parameter type T = logic [W-1:0],
+  parameter int  N = 2
+) (
+  input  logic                clk,
+  input  logic signed [W-1:0] sdin,
+  input  T                    tin,
+  output logic signed [W:0]   sum,
+  output logic [W-1:0]        y,
+  output logic [W-1:0]        lvl
+);
+
+  localparam int  DEPTH = N * 2;
+  localparam type word_t = logic [W-1:0];
+
+  typedef struct packed {
+    T      a;
+    word_t b;
+  } pair_t;
+
+  typedef enum logic [1:0] {LV_LO, LV_HI} lvl_e;
+
+  function automatic int depth_bits(int v);
+    return $clog2(v);
+  endfunction
+
+  pair_t mid;
+
+  leaf_mk #(.P(pair_t), .A(T), .AW(depth_bits(DEPTH))) u_mk (
+    .clk  (clk),
+    .a    (tin),
+    .s    (sdin),
+    .dout (mid),
+    .sum  (sum)
+  );
+
+  leaf_use #(.P(pair_t), .W(W)) u_use (
+    .clk (clk),
+    .din (mid),
+    .y   (y)
+  );
+
+  leaf_lvl #(.W(W), .L(LV_HI)) u_lvl (
+    .y (lvl)
+  );
+
+endmodule

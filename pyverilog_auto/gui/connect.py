@@ -79,6 +79,7 @@ class InstUse:
 class Decl:
     name: str
     kind: str                       # net | var | port | param | localparam | iface_inst | typedef | genvar
+                                    # | function | enumval
     owner: int
     start: int                      # whole statement
     end: int
@@ -92,12 +93,26 @@ class Decl:
     direction: Optional[str] = None # ports
     iface_type: Optional[str] = None
     modport: Optional[str] = None
-    value: Optional[str] = None     # parameter default text
+    value: Optional[str] = None     # parameter default (type parameter: default type); typedef: its type;
+                                    # enumval: the typedef or variable declaring it
+    is_type: bool = False           # ``parameter type``
+    refs: list[str] = field(default_factory=list)   # names the declaration itself references
 
     @property
     def full_type(self) -> str:
         """Type with packed dimensions, e.g. ``logic [7:0]``."""
         return f"{self.type_text} {self.dims}".strip()
+
+
+def _port_type(info) -> str:
+    """Declared type of a port with its signing, e.g. ``logic signed``
+    (an implicit type with a signing becomes ``wire``/``logic``)."""
+    if info is None:
+        return ""
+    t = info.type_text or ""
+    if info.signed:
+        t = f"{t or ('logic' if info.direction == 'output' else 'wire')} {info.signed}"
+    return t
 
 
 def _sx():
@@ -290,20 +305,40 @@ class ModuleIndex:
         for p in params.declarations:
             if not isinstance(p, SyntaxNode):
                 continue
-            if p.kind == SyntaxKind.ParameterDeclaration:
-                kw = p.keyword.valueText if p.keyword is not None else "parameter"
+            if p.kind in (SyntaxKind.ParameterDeclaration, SyntaxKind.TypeParameterDeclaration):
                 for d in p.declarators:
                     if not isinstance(d, SyntaxNode):
                         continue
                     s, e = self._node_span(d)
-                    name = d.name.valueText
-                    val = self._src(d.initializer.expr) if d.initializer is not None else None
-                    self.decls[name] = Decl(name, "localparam" if kw == "localparam" else "param", owner.id,
-                                            s, e, s, e, type_text=self._src(p.type).strip(), value=val)
-                    if d.initializer is not None:
-                        self._use(d.initializer, owner)
+                    self._param_decl(p, d, owner, s, e, s, e, 1)
             else:
                 self._use(p, owner)
+
+    def _param_decl(self, p, d, owner: Owner, start: int, end: int, ds: int, de: int, n_decl: int) -> None:
+        """Record one declarator of a (type) parameter declaration."""
+        SyntaxKind, SyntaxNode, Token = _sx()
+        kw = p.keyword.valueText if getattr(p, "keyword", None) is not None else "parameter"
+        kind = "localparam" if kw == "localparam" else "param"
+        name = d.name.valueText
+        if p.kind == SyntaxKind.TypeParameterDeclaration:
+            init = d.assignment.type if d.assignment is not None else None
+            self.decls[name] = Decl(name, kind, owner.id, start, end, ds, de, value=self._src(init).strip() or None,
+                                    n_declarators=n_decl, is_type=True, refs=self._names(init))
+        else:
+            init = d.initializer.expr if d.initializer is not None else None
+            self.decls[name] = Decl(name, kind, owner.id, start, end, ds, de, type_text=self._src(p.type).strip(),
+                                    value=self._src(init) if init is not None else None, n_declarators=n_decl,
+                                    refs=self._names(p.type, init))
+        if init is not None:
+            self._use(init, owner)
+
+    def _names(self, *nodes) -> list[str]:
+        out: list[str] = []
+        for node in nodes:
+            for n, _off in self._idents(node):
+                if n not in out:
+                    out.append(n)
+        return out
 
     def _ansi_ports(self, ports) -> None:
         SyntaxKind, SyntaxNode, Token = _sx()
@@ -319,7 +354,7 @@ class ModuleIndex:
                 s, e = self._node_span(p)
                 self.decls[name] = Decl(
                     name, "port", owner.id, s, e, s, e,
-                    type_text=(info.type_text or "") if info else "",
+                    type_text=_port_type(info),
                     dims=(info.packed_dims or "") if info else "",
                     unpacked=(info.unpacked_dims or "") if info else "",
                     in_fence=self.in_fence(s), direction=info.direction if info else None,
@@ -342,19 +377,29 @@ class ModuleIndex:
         elif k == SyntaxKind.ParameterDeclarationStatement:
             owner = self._new_owner("param", None, m)
             p = m.parameter
-            kw = p.keyword.valueText if getattr(p, "keyword", None) is not None else "parameter"
+            ms, me = self._node_span(m)
+            n_decl = sum(1 for x in p.declarators if isinstance(x, SyntaxNode))
             for d in p.declarators:
-                if not isinstance(d, SyntaxNode):
-                    continue
-                s, e = self._node_span(d)
-                ms, me = self._node_span(m)
-                name = d.name.valueText
-                val = self._src(d.initializer.expr) if d.initializer is not None else None
-                self.decls[name] = Decl(name, "localparam" if kw == "localparam" else "param", owner.id,
-                                        ms, me, s, e, type_text=self._src(p.type).strip(), value=val,
-                                        n_declarators=sum(1 for x in p.declarators if isinstance(x, SyntaxNode)))
-                if d.initializer is not None:
-                    self._use(d.initializer, owner)
+                if isinstance(d, SyntaxNode):
+                    s, e = self._node_span(d)
+                    self._param_decl(p, d, owner, ms, me, s, e, n_decl)
+        elif k == SyntaxKind.TypedefDeclaration:
+            owner = self._new_owner("other", None, m)
+            ms, me = self._node_span(m)
+            name = m.name.valueText
+            unpacked = "".join(self._src(x) for x in m.dimensions if isinstance(x, SyntaxNode))
+            self.decls.setdefault(name, Decl(name, "typedef", owner.id, ms, me, ms, me,
+                                             value=self._src(m.type).strip(), unpacked=unpacked,
+                                             in_fence=self.in_fence(ms), refs=self._names(m.type, *m.dimensions)))
+            self._enum_values(m.type, name, owner)
+            self._use(m, owner)
+        elif k == SyntaxKind.FunctionDeclaration:
+            owner = self._new_owner("other", None, m)
+            ms, me = self._node_span(m)
+            name = str(m.prototype.name).strip()
+            self.decls.setdefault(name, Decl(name, "function", owner.id, ms, me, ms, me,
+                                             in_fence=self.in_fence(ms), refs=self._names(m)))
+            self._use(m, owner)
         elif k == SyntaxKind.ContinuousAssign:
             self._use(m, self._new_owner("assign", None, m))
             for a in m.assignments:
@@ -392,6 +437,20 @@ class ModuleIndex:
 
         walk(node)
 
+    def _enum_values(self, node, declared_by: str, owner: Owner) -> None:
+        """Record the values of every enum type written in *node*."""
+        SyntaxKind, SyntaxNode, Token = _sx()
+        if not isinstance(node, SyntaxNode):
+            return
+        if node.kind == SyntaxKind.EnumType:
+            for d in node.members:
+                if isinstance(d, SyntaxNode):
+                    s, e = self._node_span(d)
+                    self.decls.setdefault(d.name.valueText, Decl(d.name.valueText, "enumval", owner.id, s, e, s, e,
+                                                                 value=declared_by))
+        for c in node:
+            self._enum_values(c, declared_by, owner)
+
     def _declaration(self, m, kind: str) -> None:
         SyntaxKind, SyntaxNode, Token = _sx()
         owner = self._new_owner("decl", None, m)
@@ -421,6 +480,8 @@ class ModuleIndex:
                 type_text=type_text, dims=dims, unpacked=unpacked, n_declarators=len(decls),
                 in_fence=self.in_fence(ms),
             ))
+        if decls:
+            self._enum_values(dt, decls[0].name.valueText, owner)
         self._use(m, owner, skip=skip)
 
     def _body_port(self, m) -> None:
@@ -436,7 +497,8 @@ class ModuleIndex:
             s, e = self._node_span(d)
             self.decls[name] = Decl(
                 name, "port", owner.id, ms, me, s, e,
-                type_text=(info.type_text or "") if info else "", dims=(info.packed_dims or "") if info else "",
+                type_text=_port_type(info), dims=(info.packed_dims or "") if info else "",
+                unpacked=(info.unpacked_dims or "") if info else "",
                 n_declarators=len(decls), in_fence=self.in_fence(ms), direction=info.direction if info else None,
             )
         self._use(m, owner, skip=skip)

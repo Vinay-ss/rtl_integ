@@ -28,7 +28,7 @@ from .connect import ConnectError, ModuleIndex
 Node = tuple[str, str]
 Partition = set[frozenset[Node]]
 
-_NOT_SIGNALS = ("param", "localparam", "genvar", "typedef")
+_NOT_SIGNALS = ("param", "localparam", "genvar", "typedef", "function", "enumval")
 
 
 class _UF:

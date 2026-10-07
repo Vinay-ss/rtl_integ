@@ -1,0 +1,15 @@
+[project]
+top = "top"
+build_dir = "build"
+gen_dir = "rtl_gen"
+
+[[template]]
+src = "tpl/blk.svp"
+lang = "python"
+
+[[template]]
+src = "tpl/top.svp"
+lang = "python"
+
+[[source]]
+path = "rtl/leaves.sv"

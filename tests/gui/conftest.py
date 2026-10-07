@@ -33,6 +33,12 @@ def proj_pkg(tmp_path) -> Path:
 
 
 @pytest.fixture
+def proj_param(tmp_path) -> Path:
+    """A parent with typed / type parameters, a typedef, an enum and a function."""
+    return copy_fixture(tmp_path, "proj_param")
+
+
+@pytest.fixture
 def proj_pl(tmp_path) -> Path:
     """Perl-template fixture project."""
     return copy_fixture(tmp_path, "proj_pl")

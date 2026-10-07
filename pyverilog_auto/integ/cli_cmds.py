@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import sys
@@ -44,6 +45,18 @@ def build_filelist(args: argparse.Namespace) -> Filelist:
     return fl
 
 
+def build_base_config(args: argparse.Namespace):
+    """Design base config from the CLI flags (``--inst-*``).
+
+    Starts from the defaults, so without flags the design behaves exactly as
+    with no base config; per-file Local Variables override these values.
+    """
+    from ..cli import apply_inst_format_args
+    from ..config import VerilogConfig
+
+    return apply_inst_format_args(VerilogConfig(), args)
+
+
 def build_design(args: argparse.Namespace) -> Optional[Design]:
     fl = build_filelist(args)
     problems = fl.problems()
@@ -60,6 +73,7 @@ def build_design(args: argparse.Namespace) -> Optional[Design]:
             fl, backend=backend, top=(fl.tops or None), strict=args.strict,
             lib_patterns=getattr(args, "lib_patterns", []) or [],
             src_patterns=getattr(args, "src_patterns", []) or [],
+            base_config=build_base_config(args),
         )
     except DesignError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -246,6 +260,17 @@ def cmd_route(args: argparse.Namespace) -> int:
         return 2
     if args.dry_run and report.diff:
         sys.stdout.write(report.diff)
+    stripped: Optional[list] = None
+    if getattr(args, "strip_autos", False):
+        # last step: after the route edits, --then-expand and the residual re-plan
+        before = {sf.key: sf.text for sf in design.source_files()}
+        stripped = design.strip_autos(dry_run=args.dry_run)
+        if args.dry_run:
+            for p in stripped:
+                sf = design.file(str(p))
+                sys.stdout.writelines(difflib.unified_diff(
+                    before.get(sf.key, "").splitlines(keepends=True), sf.text.splitlines(keepends=True),
+                    fromfile=f"a/{sf.path}", tofile=f"b/{sf.path}"))
     if not quiet:
         for r in report.results:
             for mod, decl in r.created_ports:
@@ -259,6 +284,9 @@ def cmd_route(args: argparse.Namespace) -> int:
         print(report.summary())
         if report.expand_report is not None:
             print(report.expand_report.summary())
+        if stripped is not None:
+            mode = " (dry run)" if args.dry_run else ""
+            print(f"strip: {len(stripped)} file(s) changed{mode}")
     for w in report.warnings:
         print(str(w), file=sys.stderr)
     if args.json_report:
@@ -293,7 +321,8 @@ def cmd_integrate(args: argparse.Namespace) -> int:
     log = (lambda s: None) if quiet else (lambda s: print(s))
     dry_run = args.dry_run or args.no_save
     report = design.expand_all(dry_run=dry_run, diff=args.diff, only=args.only,
-                               from_level=args.from_level, passes=passes, log=log)
+                               from_level=args.from_level, passes=passes, log=log,
+                               strip_autos=getattr(args, "strip_autos", False))
     if args.diff:
         for r in report.results:
             if r.diff:

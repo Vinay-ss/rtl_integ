@@ -10,6 +10,34 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+# Fields of ``auto_inst_port_comment``, in the order they are rendered.
+PORT_COMMENT_FIELDS: tuple[str, ...] = ("dir", "width", "type")
+
+
+def port_comment_fields(value: object, *, strict: bool = False) -> tuple[str, ...]:
+    """Parse an ``auto_inst_port_comment`` value into rendered-order fields.
+
+    Accepts ``"dir width type"`` / ``"dir,width,type"`` (any subset, any
+    order, duplicates ignored); ``True`` / ``"t"`` mean all fields and
+    ``None`` / ``""`` / ``"nil"`` mean none.  Unknown words raise
+    ``ValueError`` when *strict*, else they are ignored.
+    """
+    if value is None or value is False:
+        return ()
+    if value is True:
+        return PORT_COMMENT_FIELDS
+    text = str(value).strip()
+    if text in ("t", "True"):
+        return PORT_COMMENT_FIELDS
+    if text == "nil":
+        return ()
+    words = [w for w in text.replace(",", " ").split() if w]
+    unknown = [w for w in words if w not in PORT_COMMENT_FIELDS]
+    if unknown and strict:
+        raise ValueError(f"unknown port comment field(s): {', '.join(unknown)} "
+                         f"(choose from {', '.join(PORT_COMMENT_FIELDS)})")
+    return tuple(f for f in PORT_COMMENT_FIELDS if f in words)
+
 
 @dataclass
 class VerilogConfig:
@@ -36,6 +64,11 @@ class VerilogConfig:
     auto_inst_template_numbers: Optional[str] = None  # None, "lsb", "msb"
     auto_inst_interfaced_ports: bool = False
     auto_inst_template_required: bool = False
+    # Instance pin formatting, applied after every AUTO expansion
+    # (auto/inst_lineup.py).  Off by default: Emacs goldens are unchanged.
+    auto_inst_lineup: bool = False
+    auto_inst_port_comment: Optional[str] = None  # subset of "dir width type"
+    auto_inst_comment_column: int = 0  # 0 = automatic
     auto_arg_sort: bool = False
     auto_arg_format: str = "packed"  # "packed" or "single"
     auto_sense_include_inputs: bool = False

@@ -397,6 +397,54 @@ class AutoEngine:
         # if not cfg.auto_star_save:
         #     AutoStar(buf, cfg, db).delete()
 
+        # ----------------------------------------------------------
+        # Step 5: instance lineup / port comments — after ALL AUTO
+        # expansions so the elisp order above is unchanged.  Off by
+        # default (Emacs goldens stay byte-identical).
+        # ----------------------------------------------------------
+        if cfg.auto_inst_lineup or cfg.auto_inst_port_comment:
+            self._lineup_instances(buf, cfg, db)
+
+    # ------------------------------------------------------------------
+    # Instance lineup (auto/inst_lineup.py)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _lineup_instances(buf: "VerilogBuffer", cfg: "VerilogConfig", db) -> None:
+        """Run :func:`lineup_instances` over the whole buffer.
+
+        The lookup mirrors ``AutoInst`` (``db.lookup(name, ignore_error=True)``
+        then ``db.get_decls``); results are cached and any lookup error
+        yields ``None`` (the instance is then only aligned).
+        """
+        from .inst_lineup import lineup_instances
+
+        cache: dict = {}
+
+        def lookup(name: str):
+            if name in cache:
+                return cache[name]
+            decls = None
+            try:
+                modi = db.lookup(name, ignore_error=True)
+                if modi is not None:
+                    decls = db.get_decls(modi)
+            except Exception:
+                decls = None
+            cache[name] = decls
+            return decls
+
+        text = buf.buffer_string()
+        new = lineup_instances(text, lookup, cfg)
+        if new == text:
+            return
+        point = buf.point()
+        buf.widen()
+        buf.delete_region(0, len(text))
+        buf.goto_char(0)
+        buf.insert(new)
+        buf.goto_char(min(point, len(new)))
+
     # ------------------------------------------------------------------
     # AUTOINSERTLISP handler
     # ------------------------------------------------------------------
@@ -570,7 +618,7 @@ def _apply_lisp_env_to_config(cfg: "VerilogConfig", lisp: "AutoLispEval") -> Non
         "auto_reset_blocking_in_non", "auto_wire_comment",
         "auto_star_expand", "auto_star_save", "auto_read_includes",
         "auto_ignore_concat", "auto_simplify_expressions",
-        "case_fold",
+        "case_fold", "auto_inst_lineup",
     }
     _STR_FIELDS = {
         "auto_wire_type", "auto_declare_nettype", "auto_tieoff_declaration",
@@ -578,11 +626,12 @@ def _apply_lisp_env_to_config(cfg: "VerilogConfig", lisp: "AutoLispEval") -> Non
         "auto_tieoff_ignore_regexp", "auto_unused_ignore_regexp",
         "auto_input_ignore_regexp", "auto_output_ignore_regexp",
         "auto_inout_ignore_regexp", "assignment_delay",
+        "auto_inst_port_comment",
     }
     _INT_FIELDS = {
         "auto_inst_column", "indent_level", "indent_level_module",
         "indent_level_declaration", "indent_level_behavioral",
-        "case_indent", "cexp_indent",
+        "case_indent", "cexp_indent", "auto_inst_comment_column",
     }
 
     for name, val in lisp.env.items():

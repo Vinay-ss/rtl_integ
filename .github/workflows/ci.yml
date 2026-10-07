@@ -27,8 +27,8 @@ jobs:
       - name: Unit, integration and routing tests
         run: python -m pytest tests --ignore=tests/test_golden.py --ignore=tests/test_golden_autoinst.py -q -p no:cacheprovider
 
-      # The Emacs golden suite has 35 documented pre-existing failures (see CLAUDE.md);
-      # run it for visibility without failing the build.
+      # The Emacs golden suite has 50 documented pre-existing failures (tests/baseline_failures.txt,
+      # compare locally with tools/check_baseline.py); run it for visibility without failing the build.
       - name: Golden suite (informational)
         continue-on-error: true
         run: python -m pytest tests/test_golden.py tests/test_golden_autoinst.py -q -p no:cacheprovider

@@ -40,6 +40,7 @@ pyverilog-auto <command> [options] FILE...
 | `inject`  | Add AUTO markers to instances that lack them   |
 | `diff`    | Preview what `expand` would change (unified diff) |
 | `indent`  | Re-indent Verilog files                        |
+| `strip`   | Remove AUTO attributes, keep the generated code (see [Strip mode](#strip-mode-clean-rtl-for-preprocessor-flows)) |
 
 ### Common Options
 
@@ -60,6 +61,17 @@ pyverilog-auto <command> [options] FILE...
 | `--indent-level N`      | Override indent level (default: 3) |
 | `--align-declarations`  | Also align declaration columns  |
 
+### Output Options (`expand`, `diff`, `integrate`, `route`)
+
+| Flag                           | Description                                                         |
+|--------------------------------|---------------------------------------------------------------------|
+| `--inst-lineup`                | Align `.port`, `(net` and comments across every instance            |
+| `--inst-port-comment FIELDS`   | Trailing pin comments; FIELDS is a subset of `dir,width,type`       |
+| `--inst-comment-column N`      | Minimum column for the pin comments (default: right after the pins) |
+| `--strip-autos`                | Remove AUTO attributes after everything else has run                |
+
+The first three set the defaults; a file's Local Variables override them.
+
 ### Examples
 
 ```bash
@@ -74,6 +86,9 @@ pyverilog-auto diff -y rtl/ top.v
 
 # Strip all AUTO-generated code
 pyverilog-auto delete top.v
+
+# Expand, align instances with direction/width/type comments, then drop the AUTO attributes
+pyverilog-auto expand -y rtl/ --inst-lineup --inst-port-comment dir,width,type --strip-autos top.v
 
 # Re-indent a file
 pyverilog-auto indent top.v
@@ -131,6 +146,9 @@ end of the file:
 | `verilog-auto-inst-vector`            | `t`       | Include bit ranges in AUTOINST connections       |
 | `verilog-auto-inst-column`            | `40`      | Column for AUTOINST comment alignment            |
 | `verilog-auto-inst-template-numbers`  | `nil`     | Show template match info (`"lhs"`, `"lsb"`)     |
+| `verilog-auto-inst-lineup`            | `nil`     | Align every instance's pins (see below)          |
+| `verilog-auto-inst-port-comment`      | `nil`     | Pin comments, e.g. `"dir width type"`            |
+| `verilog-auto-inst-comment-column`    | `0`       | Minimum pin-comment column (`0` = automatic)     |
 | `verilog-auto-arg-sort`               | `nil`     | Sort AUTOARG signals alphabetically              |
 | `verilog-auto-arg-format`             | `"packed"`| AUTOARG format (`"packed"` or `"single"`)        |
 | `verilog-auto-sense-include-inputs`   | `nil`     | Include inputs in AUTOSENSE lists                |
@@ -156,6 +174,55 @@ sub sub_i (/*AUTOINST*/);
 
 Templates support Emacs-style regex with `\(` grouping and `\1`
 back-references.
+
+### Instance lineup and pin comments
+
+Two options, off by default, reformat every named-port instance in the
+module: AUTOINST pins, hand-written pins and pins added by `route`.
+
+```verilog
+// Local Variables:
+// verilog-auto-inst-lineup: t
+// verilog-auto-inst-port-comment: "dir width type"
+// End:
+```
+
+```verilog
+   leaf_c instC
+     (.clk        (clk),          // input        logic
+      .c_in       (c_in[7:0]),    // input  [7:0] logic
+      .c_busy     (c_busy),       // output       logic
+      .data_ch    (data_ch));     // interface    axi_if.master
+```
+
+How the formatting works:
+
+* **One pin per line.** The `.` column is the first pin's column. When the
+  `/*AUTOINST*/` marker comes first, it is the column after `(`.
+* **`(` column.** It is the AUTOINST column (`verilog-auto-inst-column`),
+  pushed right when a port name is longer, so long names no longer break
+  the alignment.
+* **Comment column.** Comments start one space after the longest pin, or
+  at `verilog-auto-inst-comment-column` if that is larger. Each field
+  (direction, width, type) gets its own sub-column. A field that is empty
+  for every pin is dropped.
+* **Field values.**
+  * The direction is `input`, `output`, `inout`, `interface` or `parameter`.
+  * The width is the packed range, followed by any unpacked range.
+  * The type is the declared type (plus `signed`), or `iface.modport`. It
+    is `wire` when nothing is declared.
+* **Choosing fields.** `dir`, `width` and `type` can be listed in any
+  subset; `t` means all three.
+* **Using one option alone.** With only `lineup`, pins are aligned and get
+  no comments. With only `port-comment`, the comments are added and the
+  `(` spacing stays as written.
+* **Parameter lists.** A `#(...)` parameter list is laid out separately
+  from the port list.
+* **Re-runs.** The tool's own comments are recognized and rewritten on
+  every run. `// Templated`, `// routed:` and your own comments stay after
+  them.
+* **Instances left alone.** Positional connections, lists containing
+  `` `ifdef `` and lists the tool cannot parse are not touched.
 
 ## Library Search
 
@@ -311,7 +378,10 @@ dst = 'top\.u_mem\.u_ctrl0:tick_in'
 
 Spec keys: `src`, `dst`, `name`, `net` (net-name template, may use `\1`),
 `dst_port`, `dst_modport`, `iface_conn`, `iface_params`,
-`modport_policy` (`carry` | `plain`), `check_types`, `comment`.
+`modport_policy` (`carry` | `plain`), `check_types`, `comment`,
+`create_dst` (default `true`; `false` makes a missing destination port an
+`E_DST_PORT_MISSING` error instead of creating it; a port inside an AUTO fence
+counts as existing).
 
 How it works:
 
@@ -329,6 +399,19 @@ How it works:
 * Renames are explicit pins placed before `/*AUTOINST*/` (never AUTO_TEMPLATE,
   which is module-scoped). Modules shared by several routed instances keep
   one port name; the renames happen at the parent that hosts the instances.
+* **The same connection in every instance of a module shares one net name.**
+  For example, a wrapper that is instantiated twice gets one net for each
+  route inside it.
+  * The name defaults to the port of the driving side.
+  * A capture group that only tells the wrapper instances apart is not used
+    in the name.
+  * If the copies ask for different `net` names, they collapse to one name:
+    an explicit name wins, with `W_NET_NAME_MERGED`.
+* **Different drivers never share a net.** When two drivers would get the
+  same name in a module, each default name becomes
+  `<driver path>_<port>`, for example `u_ctrl0_err` and `u_ctrl1_err`. If
+  that still clashes, or the name was written by hand, the result is
+  `E_NET_NAME_COLLISION`.
 * A module instantiated elsewhere gets the new port too; such instances are
   reported as `W_UNROUTED`, and under `/*AUTOINST*/` they receive `.port ()`
   so nothing connects implicitly. `--strict` turns this into an error.
@@ -418,6 +501,105 @@ warnings for annotations whose module is never instantiated or whose target
 is unreachable). For symmetric pairings (cluster0 -> ctrl0, cluster1 -> ctrl1)
 use a `routes.toml` with capture groups; annotations name instances, not
 positions.
+
+### Wrapper annotations (child to child)
+
+A wrapper can connect its children without touching their sources. The left
+side of the annotation names a child port as `INSTPATH:PORT`:
+
+```verilog
+module core_b (/*AUTOINPUT*/ /*AUTOOUTPUT*/);
+   //auto_route instE:e_busy  :: to   :: instF:f_hold          // instE drives instF
+   //auto_route instF:f_ack   :: from :: instE:e_ack           // instE's e_ack drives instF.f_ack
+   //auto_route instE:e_irq   :: to   :: instF:f_irq, u_sub.u_leaf:irq   // fan-out, deeper path
+   //auto_route re:top\.coreB\.inst[EF]:status :: to :: $top:status_{inst}   // instance path, full match
+   leaf_e instE (/*AUTOINST*/);
+   leaf_f instF (/*AUTOINST*/);
+endmodule
+```
+
+How the left side is read:
+
+* **Meaning.** An annotation in wrapper W with left side `instE:e_busy`
+  behaves exactly like `//auto_route e_busy :: to :: ...` written inside
+  instE's module, but only for the `instE` below each W instance. Targets,
+  `$top`/`$parent` and `{inst}`-style placeholders all work as above,
+  relative to that child.
+* **Plain `INSTPATH`.** A dotted path below W, such as `instE` or
+  `u_sub.u_leaf`.
+* **Regex `INSTPATH`.** `re:REGEX`, or any regex metacharacter, is
+  full-matched from the top and limited to W's subtree. Several matches
+  give several origins.
+* **Missing ports are errors.** A wrapper connects ports that already
+  exist, so its routes use `create_dst = false`: a mistyped far-end port is
+  an `E_DST_PORT_MISSING` error instead of a new port on a leaf. Routes
+  towards `$top`/`$parent` still create the boundary port.
+* **Net names.** As with any annotation, the net is named after the far-end
+  port: `to :: instF:f_hold` names it `f_hold`, and `from :: instE:e_ack`
+  names it `e_ack`.
+  * A fan-out with differently named far ends uses the driver's port name.
+  * The name is the same whether the wrapper is instantiated once or many
+    times. One edit to the wrapper's text connects every instance.
+  * Cross-coupled pairs (A→B and B→A) get two distinct nets, named
+    `<inst>_<port>` (e.g. `instB_err` / `instC_err`).
+* **Example.** `tests/integ/routing_wrapper/` has a wrapper instantiated
+  twice, with renamed ports, `from`, fan-out, an interface, a deeper path, a
+  regex left side and a cross-coupled pair.
+* **Other errors.** `E_AUTOROUTE_SRC` means the left side matched no
+  instance. `E_AUTOROUTE_SYNTAX` means an `auto_route ... :: ...` comment
+  did not parse.
+
+Python: `design.auto_route("core_b", "instE:e_busy", "to", "instF:f_hold")`
+returns the same `CollectResult` without writing any comment; apply its
+`.specs` with `design.apply_routes(...)`.
+
+## Strip mode (clean RTL for preprocessor flows)
+
+When the tool runs on files a preprocessor generated, the AUTO sources live in
+the original files and the output should be plain RTL. Strip mode removes every
+AUTO attribute and keeps the generated code:
+
+```bash
+pyverilog-auto expand -y rtl/ --strip-autos gen/top.v       # expand, then strip
+pyverilog-auto integrate -f design.f --strip-autos          # all source files, after every pass
+pyverilog-auto route -f design.f --collect --then-expand --strip-autos
+pyverilog-auto strip gen/*.v                                # strip already-expanded files
+```
+
+**Removed:**
+* AUTO marker comments: `/*AUTOINST*/`, `/*AUTOARG*/`, `/*AUTOSENSE*/`,
+  `/*AS*/`, `/*AUTOWIRE*/` and the rest, plus `/*memory or*/`.
+* The `// Beginning of automatic ...` / `// End of automatics` fence lines.
+  The code between them is kept.
+* `AUTO_TEMPLATE` blocks, `AUTO_LISP(...)`, `AUTO_CONSTANT(...)` and
+  `auto enum` tags.
+* `AUTONOHOOKUP` and `//auto_route` annotations.
+* The `// Outputs` / `// Inputs` / `// Inouts` / `// Interfaces` /
+  `// Parameters` headers in instance and AUTOARG lists.
+* The `// Templated ...`, `// Implicit .*` and `// routed: ...` pin comments.
+* The `Local Variables` block and the `-*- mode: Verilog -*-` cookie.
+* The `.*` token when its pins were expanded.
+
+**Kept:**
+* All code.
+* Pin comments from `--inst-port-comment`.
+* `// From/To ...` provenance comments (turn those off at generation with
+  `verilog-auto-wire-comment: nil`).
+* Your own comments.
+* Markers inside `//` comments, which are inactive.
+
+`strip` and `design.strip_autos` keep CRLF files as CRLF; `expand` writes LF, as
+it always has.
+
+Strip runs once, last: after expansion, the instance lineup, routing and
+every `integrate` pass. It covers every processed source file, so re-running
+on files that are already expanded still strips them. With `--dry-run` or
+`--diff`, the stripped result is shown and nothing is written. A stripped
+file has no markers left, so it cannot be expanded again. Keep running the
+tool on the original (or preprocessed) sources.
+
+Python: `pyverilog_auto.auto.strip.strip_autos(text)`,
+`design.expand_all(strip_autos=True)`, `design.strip_autos(files=None)`.
 
 ## Differences from Emacs verilog-mode
 

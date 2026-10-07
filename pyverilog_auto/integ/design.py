@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from copy import deepcopy
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, Literal, Optional, Union
 
 from ..config import VerilogConfig
@@ -65,7 +66,7 @@ class Design:
         self._order: Optional[Order] = None
         self._roots: Optional[list[Instance]] = None
         self._instances: Optional[dict[str, Instance]] = None
-        self._decls_cache: dict[tuple[str, int, str], "ModDecls"] = {}
+        self._decls_cache: dict[tuple, "ModDecls"] = {}   # (file, version, module, typedef_regexp)
         self.backend: str = "text"
         self.frontend = self._make_frontend(backend)
         self._opts = FrontendOptions(
@@ -430,9 +431,94 @@ class Design:
     # ------------------------------------------------------------------
 
     def expand_all(self, **kw):
+        """Leaf-first AUTO expansion of every source file (see ``Integrator``).
+
+        ``strip_autos=True`` runs :func:`~pyverilog_auto.auto.strip.strip_autos`
+        once, after all passes, over every processed ``source`` file (also the
+        ones the expansion left unchanged, so a re-run still strips).  Files
+        whose expansion failed are not stripped.  With ``dry_run``/``diff``
+        nothing is written and the strip diffs are added to the report as
+        results of pass ``report.passes + 1``.
+        """
         from .orchestrator import Integrator
 
-        return Integrator(self, **kw).run()
+        strip = bool(kw.pop("strip_autos", False))
+        report = Integrator(self, **kw).run()
+        if strip:
+            self._strip_after_expand(report, dry_run=bool(kw.get("dry_run") or kw.get("diff")),
+                                     log=kw.get("log"))
+        return report
+
+    def strip_autos(self, files: Optional[Iterable[Union[str, "os.PathLike[str]"]]] = None, *,
+                    dry_run: bool = False) -> list[Path]:
+        """Remove every AUTO attribute from *files* (default: all source files).
+
+        Files are rewritten in place byte-exactly apart from the stripped text
+        (CRLF stays CRLF); unchanged files are not touched.  With *dry_run*
+        only the in-memory overlay is updated.  Returns the changed paths.
+        """
+        if files is None:
+            keys = [sf.key for sf in self.source_files()]
+        else:
+            keys = []
+            for f in files:
+                k = self.file(os.fspath(f)).key
+                if k not in keys:
+                    keys.append(k)
+        return [Path(sf.path) for sf, _old in self._strip_keys(keys, dry_run=dry_run)]
+
+    def _strip_keys(self, keys: Iterable[str], *, dry_run: bool) -> list[tuple[SourceFile, str]]:
+        """Strip the files *keys*; return ``(file, text before)`` for the changed ones."""
+        from ..auto.strip import strip_autos
+
+        changed: list[tuple[SourceFile, str]] = []
+        for key in keys:
+            sf = self.files[key]
+            raw = sf.data.decode("utf-8", "surrogateescape")
+            new = strip_autos(raw)
+            if new == raw:
+                continue
+            data = new.encode("utf-8", "surrogateescape")
+            old_text = sf.text
+            if not dry_run:
+                with open(sf.path, "wb") as fh:
+                    fh.write(data)
+            sf.update(data.decode("utf-8", "replace"))
+            if not dry_run:
+                sf.refresh_stamp()
+            changed.append((sf, old_text))
+        if changed:
+            self.refresh([sf.path for sf, _old in changed])
+        return changed
+
+    def _strip_after_expand(self, report, *, dry_run: bool, log=None) -> None:
+        import difflib
+
+        from .orchestrator import FileResult
+
+        log = log or (lambda s: None)
+        errored = {r.key for r in report.errors()}
+        keys: list[str] = []
+        for r in report.results:
+            if r.skipped or r.key in errored or r.key in keys or self.files[r.key].role != "source":
+                continue
+            keys.append(r.key)
+        before = {sf.key: old for sf, old in self._strip_keys(keys, dry_run=dry_run)}
+        pass_no = report.passes + 1
+        level_of = report.order.level_of if report.order is not None else {}
+        for key in keys:
+            sf = self.files[key]
+            res = FileResult(sf.path, key, level_of.get(key, 0), pass_no)
+            if key in before:
+                res.changed = True
+                res.written = not dry_run
+                if dry_run:
+                    res.diff = "".join(difflib.unified_diff(
+                        before[key].splitlines(keepends=True), sf.text.splitlines(keepends=True),
+                        fromfile=f"a/{sf.path}", tofile=f"b/{sf.path}"))
+            report.results.append(res)
+            state = ("stripped" + ("" if dry_run else ", written")) if res.changed else "unchanged"
+            log(f"[strip] {sf.path}: {state}")
 
     def port_at(self, instance: InstanceLike, port: str):
         fn = getattr(self.frontend, "port_at", None)
@@ -458,10 +544,28 @@ class Design:
         return report.results[0] if report.results else None
 
     def collect_auto_routes(self, *, strict: bool = True):
-        """Collect ``//auto_route PORT :: to|from :: TARGETS`` annotations into route specs."""
+        """Collect ``//auto_route [INSTPATH:]PORT :: to|from :: TARGETS`` annotations into route specs."""
         from .auto_route import collect_auto_routes
 
         return collect_auto_routes(self, strict=strict)
+
+    def auto_route(self, module: str, left: str, direction: str, targets, *, create_dst: Optional[bool] = None):
+        """Resolve ``//auto_route LEFT :: DIRECTION :: TARGETS`` as if written in *module*.
+
+        Same resolver as the in-source annotations, without editing any file:
+        ``d.auto_route("core_b", "instE:e_busy", "to", "instF:f_hold")``.
+        *left* is ``PORT``, ``INSTPATH:PORT`` or ``re:REGEX:PORT``; *targets* a
+        list or a comma-separated string.  *create_dst* overrides the mode
+        default (False for ``INSTPATH:PORT`` unless the far end is an
+        ancestor).  Returns a ``CollectResult``; errors are in ``.errors``,
+        the specs (``.specs``) go to :meth:`apply_routes`.
+        """
+        from .auto_route import auto_route
+
+        self.hierarchy()
+        if module not in self.modules:
+            raise DesignError(f"no module {module!r}")
+        return auto_route(self, module, left, direction, targets, create_dst=create_dst)
 
     # ------------------------------------------------------------------
     # Reporting

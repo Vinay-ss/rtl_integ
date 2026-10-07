@@ -22,8 +22,24 @@ _IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
 _PORT_TPL_RE = re.compile(r"^(?:[A-Za-z_]\w*|\\\d+|\\g<\w+>)+$")
 _SPEC_KEYS = {
     "src", "dst", "name", "net", "dst_port", "dst_modport", "iface_conn", "iface_params",
-    "modport_policy", "check_types", "comment",
+    "modport_policy", "check_types", "comment", "create_dst",
 }
+_TRUE_WORDS = {"true", "yes", "on", "1", "t"}
+_FALSE_WORDS = {"false", "no", "off", "0", "nil"}
+
+
+def _spec_bool(d: Mapping[str, object], key: str, default: bool, index: int) -> bool:
+    """A boolean spec key: TOML/JSON bools, or true/false-like strings and 0/1."""
+    if key not in d or d[key] is None:
+        return default
+    v = d[key]
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int) and v in (0, 1):
+        return bool(v)
+    if isinstance(v, str) and v.strip().lower() in _TRUE_WORDS | _FALSE_WORDS:
+        return v.strip().lower() in _TRUE_WORDS
+    raise RouteError([Diagnostic("E_SPEC", "error", f"route #{index}: {key} must be true or false, not {v!r}")])
 
 
 @dataclass
@@ -63,6 +79,10 @@ class RouteSpec:
     modport_policy: str = "carry"        # carry | plain
     check_types: bool = True
     comment: bool = True
+    # False: a missing dst port is an error (E_DST_PORT_MISSING) instead of
+    # being created; a port inside an AUTO fence counts as existing
+    # (wrapper-level //auto_route sets it)
+    create_dst: bool = True
 
     # ------------------------------------------------------------------
 
@@ -87,6 +107,7 @@ class RouteSpec:
             modport_policy=policy,
             check_types=bool(d.get("check_types", True)),
             comment=bool(d.get("comment", True)),
+            create_dst=_spec_bool(d, "create_dst", True, index),
         )
 
     @classmethod

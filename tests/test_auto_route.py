@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -13,9 +14,9 @@ pytest.importorskip("pyslang")
 
 from pyverilog_auto.integ import is_slang_available  # noqa: E402
 from pyverilog_auto.integ.auto_route import (  # noqa: E402
-    collect_auto_routes, resolve_auto_routes, routes_to_toml, scan_auto_routes, write_routes_file,
+    collect_auto_routes, parse_auto_route, resolve_auto_routes, routes_to_toml, scan_auto_routes, write_routes_file,
 )
-from pyverilog_auto.integ.design import Design  # noqa: E402
+from pyverilog_auto.integ.design import Design, DesignError  # noqa: E402
 from pyverilog_auto.integ.route import RouteError, RouteSpec  # noqa: E402
 from pyverilog_auto.integ.routes_file import load_routes  # noqa: E402
 
@@ -97,19 +98,34 @@ def test_regex_and_path_targets_and_errors(tmp_path):
     assert collect_auto_routes(d, strict=False).errors
 
 
+def _inst_pins(text: str, inst: str) -> dict[str, str]:
+    m = re.search(rf"\b{inst}\s*\((.*?)\);", text, re.S)
+    assert m, inst
+    return dict(re.findall(r"\.(\w+)\s*\((\w*)\)", m.group(1)))
+
+
+def _assert_mem_err_connected(root: Path) -> None:
+    """u_ctrl0.err -> u_ctrl1.err_in inside mem.sv, i.e. in both mem instances (top and sim_top)."""
+    mem = (root / "rtl" / "mem.sv").read_text()
+    assert _inst_pins(mem, "u_ctrl0")["err"] == "err" and _inst_pins(mem, "u_ctrl1")["err_in"] == "err"
+    assert "err" not in _inst_pins(mem, "u_ctrl1") and "err_in" not in _inst_pins(mem, "u_ctrl0")
+    assert mem.count("logic err;") == 1 and "err_in;" not in mem
+
+
 def test_collected_routes_equal_explicit_specs(tmp_path):
     """Applying the annotations gives byte-identical files to the explicit specs."""
     explicit_root = _copy(tmp_path / "a")
     annotated_root = _copy(tmp_path / "b")
-    spec = RouteSpec(src=r"top\.u_mem\.u_ctrl0:err", dst=r"top\.u_mem\.u_ctrl1:err_in", name="u_ctrl0.err->ctrl.err_in")
-    _design(explicit_root).apply_routes([spec], then_expand=True)
+    # mem is instantiated in top and sim_top: the leaf annotation gives one spec per instance
+    explicit = [RouteSpec(src=rf"{t}\.u_mem\.u_ctrl0:err", dst=rf"{t}\.u_mem\.u_ctrl1:err_in",
+                          name="u_ctrl0.err->ctrl.err_in") for t in ("top", "sim_top")]
+    _design(explicit_root).apply_routes(explicit, then_expand=True)
     _annotate(annotated_root, "ctrl.sv", ["//auto_route err_in :: from :: u_ctrl0:err"])
     d = _design(annotated_root)
-    collected = d.collect_auto_routes()
-    # sim_top's mem instance is annotated too; keep only the routes under 'top' for the comparison
-    specs = [s for s in collected.specs if s.src.startswith("top")]
-    assert len(specs) == 1 and specs[0].name == spec.name
+    specs = d.collect_auto_routes().specs
+    assert sorted(specs, key=lambda s: s.src) == sorted(explicit, key=lambda s: s.src)
     d.apply_routes(specs, then_expand=True)
+    _assert_mem_err_connected(annotated_root)
     for name in RTL_FILES:
         a = (explicit_root / "rtl" / name).read_bytes()
         b = (annotated_root / "rtl" / name).read_bytes()
@@ -128,12 +144,21 @@ def test_cli_collect_only_and_apply(tmp_path):
     r = subprocess.run(cmd, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert out.exists() and "collected" in r.stdout
+    text = out.read_text()
+    assert text.count("[[route]]") == 2                  # one per mem instance
+    for t in ("top", "sim_top"):
+        assert f"src  = '{t}\\.u_mem\\.u_ctrl0:err'" in text and f"dst  = '{t}\\.u_mem\\.u_ctrl1:err_in'" in text
     assert "logic err;" not in (root / "rtl" / "mem.sv").read_text()
     cmd = [sys.executable, "-m", "pyverilog_auto", "route", "-f", str(root / "design.f"), "--relative-to", "filelist",
            "--routes", str(out), "--quiet"]
     r = subprocess.run(cmd, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    assert "logic err;" in (root / "rtl" / "mem.sv").read_text()
+    _assert_mem_err_connected(root)
+    # a second apply changes nothing
+    before = {n: (root / "rtl" / n).read_bytes() for n in RTL_FILES}
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert {n: (root / "rtl" / n).read_bytes() for n in RTL_FILES} == before
 
 
 def test_routes_to_toml_options():
@@ -239,3 +264,215 @@ def test_wildcard_and_regex_targets(tmp_path):
     assert by_port["busy"] == {r"top\.u_mem\.u_ctrl0:err_in", r"top\.u_mem\.u_ctrl1:err_in"}
     assert by_port["cfg"] == {r"top\.u_mem\.u_ctrl0:cfg_o"}
     assert "data" not in by_port
+
+
+# ----------------------------------------------------------------------
+# Wrapper-level annotations: LEFT = INSTPATH:PORT | re:REGEX:PORT
+# ----------------------------------------------------------------------
+
+def _left(c):
+    return (c.src_inst, c.port, c.direction, c.targets, c.error)
+
+
+def test_parse_left_forms():
+    kw = dict(file="w.sv", line=1)
+    assert _left(parse_auto_route("w", "err", "to", "a, b:x", **kw)) == (None, "err", "to", ["a", "b:x"], None)
+    assert _left(parse_auto_route("w", "instC:c_busy", "TO", ["instD:d_hold"], **kw)) == (
+        "instC", "c_busy", "to", ["instD:d_hold"], None)
+    assert _left(parse_auto_route("w", "u_sub.u_leaf:x", "from", "instF", **kw))[:2] == ("u_sub.u_leaf", "x")
+    # re: keeps its prefix; the port is after the LAST colon, so (?:...) groups survive
+    assert _left(parse_auto_route("w", r"re:top\.(?:a|b)\.u_x:p", "to", "y", **kw))[:2] == (r"re:top\.(?:a|b)\.u_x", "p")
+    assert _left(parse_auto_route("w", "top.*instE:p", "to", "y", **kw))[:2] == ("top.*instE", "p")
+    for bad_left, bad_dir, bad_targets in [("a.b", "to", "x"),             # no ':PORT'
+                                           ("re:u_x", "to", "x"),          # re: without ':PORT'
+                                           ("u-a:p", "to", "x"),           # not a dotted path
+                                           ("instC:p-q", "to", "x"),       # port is not an identifier
+                                           (":p", "to", "x"),              # empty INSTPATH
+                                           ("instC:p", "sideways", "x"),   # direction
+                                           ("instC:p", "to", " , ")]:      # no targets
+        assert parse_auto_route("w", bad_left, bad_dir, bad_targets, **kw).error, (bad_left, bad_dir, bad_targets)
+
+
+def test_scan_wrapper_forms_and_syntax_errors(tmp_path):
+    root = _copy(tmp_path)
+    _annotate(root, "mem.sv", [
+        "//auto_route u_ctrl0:err :: to :: u_ctrl1:err_in",
+        "/* auto_route u_ctrl1:tick_in :: from :: u_ctrl0:err */",
+        r"//auto_route re:top\.u_mem\.u_ctrl[01]:err :: to :: $parent:err_{inst}",
+        "//auto_route a.b :: to :: u_ctrl1",                 # malformed LEFT
+        "//auto_route u_ctrl0:err :: tox :: u_ctrl1",        # malformed direction
+        "// auto_route annotations below are wrapper-level",  # prose: no '::'
+        "// auto_routes: none",                               # prose: other word
+        "/* see auto_route in the docs */",                   # prose: does not start with it
+    ])
+    _annotate(root, "cluster.sv", ["//auto_route u_ctl.u_timer:tick :: to :: u_dma:tick_in"])  # deeper path
+    d = _design(root)
+    comments = scan_auto_routes(d)
+    got = [(c.module, c.src_inst, c.port, c.direction, c.targets) for c in comments if not c.error]
+    assert got == [
+        ("cluster", "u_ctl.u_timer", "tick", "to", ["u_dma:tick_in"]),
+        ("mem", "u_ctrl0", "err", "to", ["u_ctrl1:err_in"]),
+        ("mem", "u_ctrl1", "tick_in", "from", ["u_ctrl0:err"]),
+        ("mem", r"re:top\.u_mem\.u_ctrl[01]", "err", "to", ["$parent:err_{inst}"]),
+    ]
+    res = resolve_auto_routes(d, comments)
+    assert [e.code for e in res.errors] == ["E_AUTOROUTE_SYNTAX"] * 2
+    assert {e.line for e in res.errors} == {c.line for c in comments if c.error}
+    assert all("a.b" in e.message or "tox" in e.message for e in res.errors)
+    with pytest.raises(RouteError):
+        collect_auto_routes(d, strict=True)
+
+
+def test_wrapper_instantiated_twice_gives_one_spec_per_instance(tmp_path):
+    root = _copy(tmp_path)
+    _annotate(root, "mem.sv", ["//auto_route u_ctrl0:err :: to :: u_ctrl1:err_in"])   # mem: in top and sim_top
+    d = _design(root)
+    res = d.collect_auto_routes()
+    assert not res.errors and not res.warnings
+    got = sorted((r.spec.src, r.spec.dst, r.spec.net, r.spec.name, r.spec.create_dst, r.wrapper.path)
+                 for r in res.routes)
+    assert got == [
+        (r"sim_top\.u_mem\.u_ctrl0:err", r"sim_top\.u_mem\.u_ctrl1:err_in", "err_in", "u_ctrl0.err->u_ctrl1.err_in",
+         False, "sim_top.u_mem"),
+        (r"top\.u_mem\.u_ctrl0:err", r"top\.u_mem\.u_ctrl1:err_in", "err_in", "u_ctrl0.err->u_ctrl1.err_in",
+         False, "top.u_mem"),
+    ]
+
+
+def test_wrapper_route_is_the_proxy_of_a_leaf_annotation(tmp_path):
+    """cluster (twice under top): 'u_ctl.u_timer:tick' resolves like '//auto_route tick ...' in timer."""
+    leaf_root = _copy(tmp_path / "a")
+    wrap_root = _copy(tmp_path / "b")
+    _annotate(leaf_root, "timer.sv", ["//auto_route tick :: to :: u_dma:tick_in",
+                                      "//auto_route tick :: to :: $top:tick_{n}"])
+    _annotate(wrap_root, "cluster.sv", ["//auto_route u_ctl.u_timer:tick :: to :: u_dma:tick_in",
+                                        "//auto_route u_ctl.u_timer:tick :: to :: $top:tick_{n}",
+                                        "//auto_route u_core.u_dma:irq :: to :: $parent:irq_{parent}_{path}"])
+    leaf = _design(leaf_root).collect_auto_routes()
+    wrap = _design(wrap_root).collect_auto_routes()
+    assert not wrap.errors and not wrap.warnings
+    leaf_set = {(r.spec.src, r.spec.dst, r.spec.net) for r in leaf.routes}
+    assert {(r.spec.src, r.spec.dst, r.spec.net) for r in wrap.routes if r.comment.port == "tick"} == leaf_set
+    assert (r"top\.u_cluster1\.u_ctl\.u_timer:tick", r"top\.u_cluster1\.u_core\.u_dma:tick_in", "tick_in") in leaf_set
+    assert (r"top\.u_cluster1\.u_ctl\.u_timer:tick", "top:tick_1", "tick_1") in leaf_set
+    # leaf-style specs keep create_dst=True; wrapper-level ones are False except towards an ancestor boundary
+    assert all(r.spec.create_dst and r.wrapper is None and r.comment.src_inst is None for r in leaf.routes)
+    cd = {r.spec.dst: r.spec.create_dst for r in wrap.routes}
+    assert cd[r"top\.u_cluster0\.u_core\.u_dma:tick_in"] is False
+    assert cd["top:tick_0"] is True and cd[r"top\.u_cluster0\.u_core:irq_u_core_u_cluster0_u_core_u_dma"] is True
+
+
+def test_wrapper_from_direction(tmp_path):
+    root = _copy(tmp_path)
+    _annotate(root, "mem.sv", ["//auto_route u_ctrl1:err_in :: from :: u_ctrl0:err"])
+    d = _design(root)
+    res = d.collect_auto_routes()
+    assert not res.warnings     # the leaf-style form warns for u_ctrl0 (it cannot reach itself)
+    got = sorted((r.spec.src, r.spec.dst, r.spec.net, r.spec.name, r.spec.create_dst) for r in res.routes)
+    assert got == [
+        (r"sim_top\.u_mem\.u_ctrl0:err", r"sim_top\.u_mem\.u_ctrl1:err_in", None, "u_ctrl0.err->u_ctrl1.err_in", False),
+        (r"top\.u_mem\.u_ctrl0:err", r"top\.u_mem\.u_ctrl1:err_in", None, "u_ctrl0.err->u_ctrl1.err_in", False),
+    ]
+
+
+def test_wrapper_regex_left(tmp_path):
+    """re:/metacharacter LEFTs are full-matched from the top, intersected with each wrapper instance."""
+    root = _copy(tmp_path)
+    _annotate(root, "mem.sv", [
+        r"//auto_route re:top\.u_mem\.u_ctrl[01]:err :: to :: $parent:err_{inst}",   # only top's mem, both ctrls
+        "//auto_route .*u_ctrl1:cfg_o :: to :: $parent:cfg_{n}",                      # metachars: both trees
+        "//auto_route u_mem.*u_ctrl1:rd :: to :: $parent",                            # no 'top' prefix: no match
+        r"//auto_route re:top\.u_cluster0\.u_core:irq :: to :: u_ctrl0",              # outside mem's subtree
+        "//auto_route re:u_ctrl[:err :: to :: u_ctrl1",                               # invalid pattern
+    ])
+    d = _design(root)
+    res = d.collect_auto_routes(strict=False)
+    assert [e.code for e in res.errors] == ["E_AUTOROUTE_SRC"] * 3
+    assert any("invalid pattern" in e.message for e in res.errors)
+    assert any("'u_mem.*u_ctrl1'" in e.message and "from the top" in e.message for e in res.errors)
+    by_port: dict[str, set] = {}
+    for r in res.routes:
+        by_port.setdefault(r.comment.port, set()).add((r.spec.src, r.spec.dst))
+    assert by_port["err"] == {(r"top\.u_mem\.u_ctrl0:err", r"top\.u_mem:err_u_ctrl0"),
+                              (r"top\.u_mem\.u_ctrl1:err", r"top\.u_mem:err_u_ctrl1")}
+    # {n} counts the annotation's origins per tree
+    assert by_port["cfg_o"] == {(r"top\.u_mem\.u_ctrl1:cfg_o", r"top\.u_mem:cfg_0"),
+                                (r"sim_top\.u_mem\.u_ctrl1:cfg_o", r"sim_top\.u_mem:cfg_0")}
+
+
+def test_wrapper_codes_unused_and_no_match(tmp_path):
+    root = _copy(tmp_path)
+    _annotate(root, "sim_top.sv", ["//auto_route u_mem.u_ctrl0:err :: to :: u_ctrl1:err_in"])
+    _annotate(root, "mem.sv", ["//auto_route u_nope:err :: to :: u_ctrl1:err_in",      # no such child
+                               "//auto_route u_mem.u_ctrl0:err :: to :: u_ctrl1"])      # path is relative to mem
+    d = Design.from_filelist(str(root / "design.f"), relative_to="filelist", backend="slang", top="top")
+    res = resolve_auto_routes(d, scan_auto_routes(d))
+    assert [w.code for w in res.warnings] == ["W_AUTOROUTE_UNUSED"]           # sim_top is not elaborated
+    assert [e.code for e in res.errors] == ["E_AUTOROUTE_SRC"] * 2
+    assert not res.routes
+
+
+def test_create_dst_false_round_trips_through_toml(tmp_path):
+    root = _copy(tmp_path)
+    _annotate(root, "mem.sv", ["//auto_route u_ctrl0:err :: to :: u_ctrl1:err_in",
+                               "//auto_route u_ctrl1:tick_in :: from :: u_ctrl0:err"])
+    _annotate(root, "ctrl.sv", ["//auto_route irq_in :: from :: $parent:irq_{inst}"])   # leaf-style: no create_dst
+    out = tmp_path / "collected.toml"
+    cmd = [sys.executable, "-m", "pyverilog_auto", "route", "-f", str(root / "design.f"), "--relative-to", "filelist",
+           "--collect-only", "--routes-out", str(out)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    text = out.read_text()
+    assert text.count("create_dst = false") == 4
+    assert "[top.u_mem: u_ctrl0:err -> top.u_mem.u_ctrl1]" in text
+    assert "[sim_top.u_mem: u_ctrl1:tick_in <- sim_top.u_mem.u_ctrl0]" in text
+    loaded = load_routes(str(out))
+    specs = _design(root).collect_auto_routes().specs
+    assert loaded == specs
+    assert sorted(s.create_dst for s in loaded) == [False] * 4 + [True] * 4
+
+
+def test_api_matches_comment(tmp_path):
+    root = _copy(tmp_path)
+    _annotate(root, "mem.sv", ["//auto_route u_ctrl0:err :: to :: u_ctrl1:tick_in, $parent:e_{n}"])
+    _annotate(root, "ctrl.sv", ["//auto_route err_in :: from :: u_ctrl0:err"])
+    d = _design(root)
+    res = d.collect_auto_routes(strict=False)
+    by_mod = {m: [r.spec for r in res.routes if r.comment.module == m] for m in ("mem", "ctrl")}
+    assert len(by_mod["mem"]) == 4 and len(by_mod["ctrl"]) == 2
+    assert d.auto_route("mem", "u_ctrl0:err", "to", "u_ctrl1:tick_in, $parent:e_{n}").specs == by_mod["mem"]
+    assert d.auto_route("mem", "u_ctrl0:err", "To", ["u_ctrl1:tick_in", "$parent:e_{n}"]).specs == by_mod["mem"]
+    assert d.auto_route("ctrl", "err_in", "from", "u_ctrl0:err").specs == by_mod["ctrl"]
+    # create_dst override and errors (returned, not raised)
+    assert all(s.create_dst for s in d.auto_route("mem", "u_ctrl0:err", "to", "u_ctrl1:err_in", create_dst=True).specs)
+    assert [e.code for e in d.auto_route("mem", "a.b", "to", "u_ctrl1").errors] == ["E_AUTOROUTE_SYNTAX"]
+    assert [e.code for e in d.auto_route("mem", "u_ctrl0:err", "sideways", "u_ctrl1").errors] == ["E_AUTOROUTE_SYNTAX"]
+    assert [e.code for e in d.auto_route("mem", "u_x:err", "to", "u_ctrl1").errors] == ["E_AUTOROUTE_SRC"]
+    with pytest.raises(DesignError):
+        d.auto_route("no_such_module", "u_ctrl0:err", "to", "u_ctrl1")
+
+
+def test_wrapper_route_single_instance_end_to_end(tmp_path):
+    """A wrapper-level annotation in 'top' (one instance) applies exactly like the equivalent explicit spec."""
+    explicit_root = _copy(tmp_path / "a")
+    annotated_root = _copy(tmp_path / "b")
+    line = "//auto_route u_mem.u_ctrl0:err :: to :: u_ctrl1:err_in"
+    _annotate(annotated_root, "top.v", [line])
+    d = _design(annotated_root)
+    res = d.collect_auto_routes()
+    assert not res.warnings
+    expected = RouteSpec(src=r"top\.u_mem\.u_ctrl0:err", dst=r"top\.u_mem\.u_ctrl1:err_in",
+                         name="u_mem.u_ctrl0.err->u_ctrl1.err_in", net="err_in", create_dst=False)
+    assert res.specs == [expected]
+    _design(explicit_root).apply_routes([expected], then_expand=True)
+    rep = d.apply_routes(res.specs, then_expand=True)
+    assert not rep.residual
+    for name in RTL_FILES:
+        a = (explicit_root / "rtl" / name).read_bytes()
+        b = (annotated_root / "rtl" / name).read_bytes()
+        if name == "top.v":
+            b = b.replace(f"   {line}\n".encode(), b"")
+        assert a == b, name
+    mem = (annotated_root / "rtl" / "mem.sv").read_text()
+    assert "(err_in)" in mem and "err_in" in mem.split("u_ctrl0")[1].split(";")[0]
+    assert d.apply_routes(d.collect_auto_routes().specs, then_expand=True).edits == []

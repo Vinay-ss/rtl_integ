@@ -1,10 +1,13 @@
-// Leaf E (instance instE under coreB): sinks the data channel, raises irq.
+// Leaf E (instance instE under coreB): sinks the data channel, raises irq, tells instF to hold.
 module leaf_e
   (input  logic       clk,
    input  logic       rst_n,
    axi_if.slave       data_ch,
    output logic       irq,
+   output logic       e_busy,
    output logic [7:0] e_cnt);
+
+   assign e_busy = &e_cnt;
 
    always_ff @(posedge clk or negedge rst_n)
      if (!rst_n) begin

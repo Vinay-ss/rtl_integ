@@ -6,6 +6,7 @@ Usage::
     pyverilog-auto delete  top.v           # strip AUTO sections
     pyverilog-auto inject  top.v           # add AUTO markers
     pyverilog-auto diff    top.v           # preview changes
+    pyverilog-auto strip   top.v           # remove AUTO attributes, keep the code
 """
 
 from __future__ import annotations
@@ -14,6 +15,66 @@ import argparse
 import difflib
 import sys
 from pathlib import Path
+
+
+def _port_comment_arg(value: str) -> str:
+    """argparse type for ``--inst-port-comment``: normalize to ``"dir width type"``."""
+    from .config import port_comment_fields
+
+    try:
+        fields = port_comment_fields(value, strict=True)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+    if not fields:
+        raise argparse.ArgumentTypeError("give at least one of dir, width, type")
+    return " ".join(fields)
+
+
+def _non_negative_int(value: str) -> int:
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer") from None
+    if n < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return n
+
+
+def _add_inst_format_args(parser: argparse.ArgumentParser) -> None:
+    """Instance formatting + strip options (expand, diff, integrate, route only)."""
+    parser.add_argument(
+        "--inst-lineup", action="store_true", default=None,
+        help="Align instance pins: .port, (net) and comments in columns (verilog-auto-inst-lineup)",
+    )
+    parser.add_argument(
+        "--inst-port-comment", type=_port_comment_arg, default=None, metavar="FIELDS",
+        help="Trailing pin comments with any of dir,width,type (verilog-auto-inst-port-comment)",
+    )
+    parser.add_argument(
+        "--inst-comment-column", type=_non_negative_int, default=None, metavar="N",
+        help="Minimum column of the pin comments; 0 = automatic (verilog-auto-inst-comment-column)",
+    )
+    parser.add_argument(
+        "--strip-autos", action="store_true",
+        help="After expansion, remove every AUTO attribute (markers, fences, templates, "
+             "headers, Local Variables) and keep the generated code",
+    )
+
+
+def apply_inst_format_args(cfg, args: argparse.Namespace):
+    """Copy the ``--inst-*`` flags that were given onto *cfg* (returned).
+
+    These set the base config; a file's Local Variables override them.
+    """
+    if getattr(args, "inst_lineup", None):
+        cfg.auto_inst_lineup = True
+    port_comment = getattr(args, "inst_port_comment", None)
+    if port_comment:
+        cfg.auto_inst_port_comment = port_comment
+    column = getattr(args, "inst_comment_column", None)
+    if column is not None:
+        cfg.auto_inst_comment_column = column
+    return cfg
 
 
 def _add_library_args(parser: argparse.ArgumentParser) -> None:
@@ -74,7 +135,7 @@ def _build_config(args: argparse.Namespace):
     for ff in args.flagfiles:
         cfg = VerilogGetopt(cfg).parse_flag_file(ff)
 
-    return cfg
+    return apply_inst_format_args(cfg, args)
 
 
 def _add_design_args(parser: argparse.ArgumentParser) -> None:
@@ -141,6 +202,10 @@ def _cmd_expand(args: argparse.Namespace) -> int:
 
     cfg = _build_config(args)
     engine = AutoEngine(cfg)
+    strip = getattr(args, "strip_autos", False)
+    if strip:
+        from .auto.strip import strip_autos
+    written: list[VerilogBuffer] = []
 
     for filepath in args.files:
         path = Path(filepath)
@@ -152,9 +217,59 @@ def _cmd_expand(args: argparse.Namespace) -> int:
         engine.run(buf, cfg)
 
         if args.no_save:
-            sys.stdout.write(buf.buffer_string())
+            text = buf.buffer_string()
+            sys.stdout.write(strip_autos(text) if strip else text)
         else:
             buf.write_to_file()
+            written.append(buf)
+
+    # Strip once, last: later files may read earlier ones from disk while
+    # they expand, so those must still carry their AUTO markers/headers.
+    if strip:
+        for buf in written:
+            text = buf.buffer_string()
+            new = strip_autos(text)
+            if new != text:
+                VerilogBuffer.from_string(new, buf.filepath).write_to_file()
+
+    return 0
+
+
+def _write_stdout_raw(text: str) -> None:
+    """Write *text* to stdout without newline translation (keeps CRLF as is)."""
+    out = getattr(sys.stdout, "buffer", None)
+    if out is None:
+        sys.stdout.write(text)
+        return
+    sys.stdout.flush()
+    out.write(text.encode("utf-8", "surrogateescape"))
+    out.flush()
+
+
+def _cmd_strip(args: argparse.Namespace) -> int:
+    """Remove every AUTO attribute and keep the generated code.
+
+    Reads and writes with ``newline=""`` so CRLF files stay CRLF; does not
+    use ``VerilogBuffer`` (which normalizes line endings).  Unchanged files
+    are not rewritten.
+    """
+    from .auto.strip import strip_autos
+
+    for filepath in args.files:
+        path = Path(filepath)
+        if not path.exists():
+            print(f"Error: {filepath} not found", file=sys.stderr)
+            return 1
+
+        with open(path, "r", encoding="utf-8", errors="surrogateescape", newline="") as fh:
+            text = fh.read()
+        new = strip_autos(text)
+
+        if args.no_save:
+            _write_stdout_raw(new)
+        elif new != text:
+            with open(path, "w", encoding="utf-8", errors="surrogateescape", newline="") as fh:
+                fh.write(new)
 
     return 0
 
@@ -275,6 +390,10 @@ def _cmd_diff(args: argparse.Namespace) -> int:
         buf = VerilogBuffer.from_file(str(path))
         engine.run(buf, cfg)
         expanded = buf.buffer_string()
+        if getattr(args, "strip_autos", False):
+            from .auto.strip import strip_autos
+
+            expanded = strip_autos(expanded)
 
         if original != expanded:
             diff = difflib.unified_diff(
@@ -288,8 +407,8 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> int:
-    """Entry point for ``pyverilog-auto`` CLI."""
+def build_parser() -> argparse.ArgumentParser:
+    """The ``pyverilog-auto`` argument parser (all subcommands)."""
     parser = argparse.ArgumentParser(
         prog="pyverilog-auto",
         description="Verilog AUTO code generation (Python port of verilog-mode)",
@@ -299,6 +418,7 @@ def main() -> int:
     # expand
     exp = subparsers.add_parser("expand", help="Run AUTO expansion")
     _add_library_args(exp)
+    _add_inst_format_args(exp)
 
     # delete
     dlt = subparsers.add_parser("delete", help="Remove AUTO-generated sections")
@@ -311,6 +431,17 @@ def main() -> int:
     # diff
     dff = subparsers.add_parser("diff", help="Show what expand would change")
     _add_library_args(dff)
+    _add_inst_format_args(dff)
+
+    # strip
+    stp = subparsers.add_parser(
+        "strip", help="Remove every AUTO attribute (markers, fences, templates, headers) and keep the code",
+    )
+    stp.add_argument(
+        "--no-save", action="store_true",
+        help="Print result to stdout instead of overwriting",
+    )
+    stp.add_argument("files", nargs="+", metavar="FILE")
 
     # indent
     ind = subparsers.add_parser("indent", help="Re-indent Verilog files")
@@ -341,6 +472,7 @@ def main() -> int:
         help="Expand AUTOs in every source file of a design, leaves first",
     )
     _add_design_args(integ)
+    _add_inst_format_args(integ)
     integ.add_argument("--dry-run", action="store_true", help="Compute but do not write")
     integ.add_argument("--diff", action="store_true", help="Print unified diffs, do not write")
     integ.add_argument("--no-save", action="store_true", help="Alias of --dry-run")
@@ -357,11 +489,12 @@ def main() -> int:
         "route", help="Connect a signal/struct/interface port between instances addressed by regex paths",
     )
     _add_design_args(rt)
+    _add_inst_format_args(rt)
     rt.add_argument("--routes", metavar="FILE", default=None, help="Routes file (.toml or .json)")
     rt.add_argument("--route", nargs=2, action="append", metavar=("SRC", "DST"), default=[],
                     help="One route: SRC='PATH_REGEX:port' DST='PATH_TEMPLATE[:port]' (may repeat)")
     rt.add_argument("--collect", action="store_true",
-                    help="Collect '//auto_route PORT :: to|from :: TARGETS' annotations from the sources and apply them")
+                    help="Collect '//auto_route [INSTPATH:]PORT :: to|from :: TARGETS' annotations from the sources and apply them")
     rt.add_argument("--collect-only", action="store_true",
                     help="Collect the annotations and write --routes-out, but do not apply anything")
     rt.add_argument("--routes-out", metavar="FILE", default=None,
@@ -371,8 +504,12 @@ def main() -> int:
     rt.add_argument("--no-comment", action="store_true", help="Do not add '// routed:' comments")
     rt.add_argument("--json-report", metavar="FILE", default=None, help="Write the edit report as JSON")
     rt.add_argument("--quiet", action="store_true", help="No progress output")
+    return parser
 
-    args = parser.parse_args()
+
+def main(argv: "list[str] | None" = None) -> int:
+    """Entry point for ``pyverilog-auto`` CLI."""
+    args = build_parser().parse_args(argv)
 
     if args.command in ("hierarchy", "integrate", "expand-all", "route"):
         from .integ.cli_cmds import cmd_hierarchy, cmd_integrate, cmd_route
@@ -389,6 +526,7 @@ def main() -> int:
         "inject": _cmd_inject,
         "diff": _cmd_diff,
         "indent": _cmd_indent,
+        "strip": _cmd_strip,
     }
 
     return dispatch[args.command](args)

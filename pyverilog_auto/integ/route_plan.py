@@ -65,6 +65,7 @@ class RouteNet:
     pairs: list[PairPlan]
     base_name: str = ""
     groups: tuple = ()
+    name_explicit: bool = False    # base_name is a user-written 'net' (not a default)
 
 
 @dataclass
@@ -82,6 +83,10 @@ class Step:
     parent_is_host: bool           # parent hosts the net (lca) or the boundary port (ancestor modes)
     pin_auto: bool = False
     port_auto: bool = False
+    # who drives parent_name inside the parent module (see RoutePlanner._usage_key)
+    drv_key: tuple = ()
+    drv_abs: Optional[tuple] = None   # absolute driver, for names driven from outside the parent
+    name_explicit: bool = False       # parent_name is user-written (or a fixed boundary port)
 
 
 @dataclass
@@ -157,9 +162,13 @@ class RoutePlanner:
         self._planned_pins: dict[tuple[str, str], tuple[str, str]] = {}   # (module, inst, port) -> (net, route)
         self._edit_keys: dict[tuple, TextEdit] = {}
         self._fences: dict[str, list[tuple[int, int]]] = {}
-        self._visits: dict[str, dict[int, set[str]]] = {}
+        # module -> net class signature -> instance paths (see _net_signature)
+        self._visits: dict[str, dict[tuple, set[str]]] = {}
+        self._sigs: dict[int, tuple] = {}                             # id(net) -> class signature
+        self._name_overrides: dict[tuple, str] = {}                   # (module, drv_key) -> unique name
         # (file key, list start, anchor start) -> batch of list entries
         self._lists: dict[tuple, dict] = {}
+        self._inst_columns: dict[str, int] = {}                      # file key -> auto_inst_column
 
     # ------------------------------------------------------------------
 
@@ -198,9 +207,9 @@ class RoutePlanner:
             raise RouteError(self.errors)
 
         self._collect_visits(nets_all)
-        steps: list[Step] = []
-        for net in nets_all:
-            steps.extend(self._steps_for(net))
+        steps = self._name_steps(nets_all)
+        if self.errors:
+            raise RouteError(self.errors)
         self._decide_strategy(steps)
         edits = EditSet(design)
         for net in nets_all:
@@ -283,6 +292,14 @@ class RoutePlanner:
         dst_mod = dst_inst.module
         assert dst_mod is not None
         dst_pinfo = dst_mod.port(pair.dst.port)
+        if dst_pinfo is None and not pair.spec.create_dst:
+            # a port inside an AUTO fence still exists (it is only regenerated)
+            names = [p.name for p in dst_mod.ports]
+            close = [n for n in names if pair.dst.port.lower() in n.lower() or n.lower() in pair.dst.port.lower()]
+            hint = f"; closest: {', '.join(close[:5])}" if close else f"; ports: {', '.join(names[:12])}"
+            self._err("E_DST_PORT_MISSING", f"{dst_inst.path} ({dst_inst.module_name}) has no port {pair.dst.port!r} "
+                      f"and the route may not create it (create_dst = false){hint}", route=label, inst=dst_inst)
+            return None
         if dst_pinfo is not None and dst_pinfo.in_auto_fence:
             dst_pinfo = None   # transient (regenerated) declaration
         if mode == "lca":
@@ -385,6 +402,40 @@ class RoutePlanner:
     # Phase C: names
     # ------------------------------------------------------------------
 
+    def _net_signature(self, net: RouteNet) -> tuple:
+        """Equivalence class of *net*: host module, mode, and the instance
+        names (relative to the host) and port on each side, per pair.
+
+        Nets with one signature are the same connection inside the same
+        module text -- typically one per instance of a wrapper that is
+        instantiated several times -- so they must share one net name."""
+        sig = self._sigs.get(id(net))
+        if sig is None:
+            def rel(chain: list[Instance]) -> tuple:
+                return tuple(i.name for i in chain[1:])
+            sig = tuple(sorted({(pp.lca.module_name, pp.mode, rel(pp.src_chain), pp.pair.src.port,
+                                 rel(pp.dst_chain), pp.pair.dst.port) for pp in net.pairs}))
+            self._sigs[id(net)] = sig
+        return sig
+
+    def _driver_key(self, net: RouteNet) -> tuple:
+        """The driver pin of *net* as seen from its host module (lca mode), so
+        copies of one wrapper agree; the absolute endpoint otherwise.  The last
+        element is the driver's port name."""
+        pp = net.pairs[0]
+        drv = self._driving_side(net, pp)
+        if pp.mode == "lca" and drv is not None:
+            chain, port = (pp.src_chain, pp.pair.src.port) if drv == "src" else (pp.dst_chain, pp.pair.dst.port)
+            return ("rel", pp.lca.module_name, tuple(i.name for i in chain[1:]), port)
+        return ("abs", str(net.identity), net.identity.port)
+
+    @staticmethod
+    def _common_groups(members: list[RouteNet]) -> tuple:
+        """src capture groups that agree across all *members* of one class
+        (a group that only tells wrapper instances apart cannot name the net)."""
+        rows = [n.pairs[0].pair.src_match.groups() for n in members]
+        return tuple(col[0] for col in zip(*rows) if col[0] is not None and all(g == col[0] for g in col))
+
     def _assign_names(self, nets: list[RouteNet]) -> None:
         by_spec: dict[int, list[RouteNet]] = {}
         for net in nets:
@@ -392,69 +443,215 @@ class RoutePlanner:
         for group in by_spec.values():
             spec = group[0].spec
             label = spec.label()
+            # nets of one class only need one name; distinct classes need distinct names
+            classes: dict[tuple, list[RouteNet]] = {}
             for net in group:
-                pp = net.pairs[0]
-                m = pp.pair.src_match
-                net.groups = tuple(g for g in m.groups() if g is not None)
-                src_port = pp.pair.src.port
+                net.groups = tuple(g for g in net.pairs[0].pair.src_match.groups() if g is not None)
+                classes.setdefault(self._net_signature(net), []).append(net)
+            for members in classes.values():
+                src_port = members[0].pairs[0].pair.src.port
                 if spec.net:
-                    base = expand_backrefs(spec.net, m, regex_escape=False, route=label)
-                elif len(group) == 1:
-                    base = src_port
+                    names = [expand_backrefs(spec.net, n.pairs[0].pair.src_match, regex_escape=False, route=label)
+                             for n in members]
+                elif len(classes) == 1:
+                    names = [src_port] * len(members)
                 else:
-                    if not net.groups:
-                        self._err("E_NET_NAME_NEEDED", f"{len(group)} distinct nets need distinct names: add a capture group to src or set 'net'", route=label)
+                    common = self._common_groups(members)
+                    if not common:
+                        self._err("E_NET_NAME_NEEDED", f"{len(classes)} distinct nets need distinct names: add a capture group to src or set 'net'", route=label)
                         base = src_port
                     else:
-                        base = src_port + "_" + "_".join(re.sub(r"\W+", "_", g) for g in net.groups)
-                if not is_identifier(base):
-                    self._err("E_BAD_NET_NAME", f"net name {base!r} is not an identifier", route=label)
-                net.base_name = base
+                        base = src_port + "_" + "_".join(re.sub(r"\W+", "_", g) for g in common)
+                    names = [base] * len(members)
+                for base in dict.fromkeys(names):
+                    if not is_identifier(base):
+                        self._err("E_BAD_NET_NAME", f"net name {base!r} is not an identifier", route=label)
+                for net, base in zip(members, names):
+                    net.base_name = base
+                    # a 'net' equal to the dst port is what a //auto_route 'to' annotation writes
+                    # for a renamed far end: a default, not a name the user insists on
+                    net.name_explicit = bool(spec.net) and any(base != pp.pair.dst.port for pp in net.pairs)
+        # one driver pin is one net: routes from the same driver (a fan-out with renamed
+        # far ends, or different connections in copies of one host module) share one
+        # name -- the user-written one when there is exactly one, else the driver's
+        # port name; several user-written names are left for E_PIN_CONFLICT to report
+        by_driver: dict[tuple, list[RouteNet]] = {}
+        for net in nets:
+            by_driver.setdefault(self._driver_key(net), []).append(net)
+        for dkey, members in by_driver.items():
+            names = list(dict.fromkeys(n.base_name for n in members))
+            if len(names) < 2:
+                continue
+            explicit = list(dict.fromkeys(n.base_name for n in members if n.name_explicit))
+            if len(explicit) > 1:
+                continue
+            chosen = explicit[0] if explicit else dkey[-1]
+            if explicit:       # a user-written name replaces another route's default
+                self._warn("W_NET_NAME_MERGED",
+                           f"{', '.join(str(n.identity) for n in members)} share one driver pin: using net name {chosen!r} "
+                           f"(not {', '.join(repr(x) for x in names if x != chosen)})", route=members[0].spec.label())
+            for net in members:
+                net.base_name = chosen
+                net.name_explicit = bool(explicit)
+        # one canonical name per class (across specs): an explicit 'net' wins, else the first
+        by_class: dict[tuple, list[RouteNet]] = {}
+        for net in nets:
+            by_class.setdefault(self._net_signature(net), []).append(net)
+        for sig, members in by_class.items():
+            names = list(dict.fromkeys(n.base_name for n in members))
+            if len(names) < 2:
+                continue
+            chosen = next((n.base_name for n in members if n.name_explicit), members[0].base_name)
+            explicit = any(n.name_explicit for n in members if n.base_name == chosen)
+            self._warn("W_NET_NAME_MERGED",
+                       f"{', '.join(str(n.identity) for n in members)} are one connection inside module {sig[0][0]}: "
+                       f"using net name {chosen!r} (not {', '.join(repr(x) for x in names if x != chosen)})",
+                       route=members[0].spec.label())
+            for net in members:
+                net.base_name = chosen
+                net.name_explicit = explicit
+        for group in by_spec.values():
+            label = group[0].spec.label()
             seen: dict[str, RouteNet] = {}
             for net in group:
-                other = seen.get(net.base_name)
-                if other is not None and other is not net:
+                other = seen.setdefault(net.base_name, net)
+                if self._net_signature(other) != self._net_signature(net):
                     self._err("E_NET_NAME_COLLISION", f"nets {other.identity} and {net.identity} both map to {net.base_name!r}; add \\1 to 'net'", route=label)
-                seen[net.base_name] = net
 
     def _collect_visits(self, nets: list[RouteNet]) -> None:
-        """Which modules are visited by which nets through which instances
-        (intermediates and hosts); decides where port names must be shared."""
+        """Which modules are visited by which net classes through which
+        instances (intermediates and hosts); decides where port names must be
+        shared.  Nets of one class (see _net_signature) count once."""
         self._visits = {}
         for net in nets:
+            sig = self._net_signature(net)
             for pp in net.pairs:
                 for chain in (pp.src_chain, pp.dst_chain):
                     for inst in chain[:-1]:          # everything but the endpoint
-                        self._visits.setdefault(inst.module_name, {}).setdefault(id(net), set()).add(inst.path)
+                        self._visits.setdefault(inst.module_name, {}).setdefault(sig, set()).add(inst.path)
+
+    @staticmethod
+    def _driving_side(net: RouteNet, pp: PairPlan) -> Optional[str]:
+        """The chain whose endpoint drives the net; None when the host's own
+        boundary port drives it from outside (ancestor modes)."""
+        out = net.kind == "iface" or net.src_ep.direction in ("output", "inout")
+        if pp.mode == "lca":
+            return "src" if out else "dst"
+        if net.kind == "iface":
+            return None
+        if pp.mode == "dst_is_ancestor":
+            return "src" if out else None
+        return "dst" if out else None          # src_is_ancestor: an output dst drives the src port
+
+    def _usage_key(self, net: RouteNet, pp: PairPlan, drv: Optional[str], side: str, j: int) -> tuple[tuple, Optional[tuple]]:
+        """Who drives the name used in ``chain[j]`` (side *side*): ``("int", rel path, port)``
+        for a driver below it (relative, so wrapper copies agree), else ``("ext", host
+        module, rel path from the host, port)`` plus the absolute driver."""
+        chain = pp.src_chain if side == "src" else pp.dst_chain
+        if drv is not None:
+            dchain, dport = (pp.src_chain, pp.pair.src.port) if drv == "src" else (pp.dst_chain, pp.pair.dst.port)
+            if drv == side:
+                return ("int", tuple(i.name for i in chain[j + 1:]), dport), None
+            if j == 0:
+                return ("int", tuple(i.name for i in dchain[1:]), dport), None
+            return ("ext", pp.lca.module_name, tuple(i.name for i in dchain[1:]), dport), (dchain[-1].path, dport)
+        bport = pp.pair.dst.port if pp.mode == "dst_is_ancestor" else pp.pair.src.port
+        return ("ext", pp.lca.module_name, (), bport), (pp.lca.path, bport)
+
+    def _walk(self, net: RouteNet, pp: PairPlan, drv: Optional[str], side: str, chain: list[Instance],
+              ep_port: str) -> tuple[list[tuple], str]:
+        """Names for the intermediates of one chain (endpoint upwards) and the
+        name carried up to the host's child pin."""
+        items: list[tuple] = []
+        name = ep_port
+        for k in range(len(chain) - 1, 1, -1):
+            parent = chain[k - 1]
+            key, abs_drv = self._usage_key(net, pp, drv, side, k - 1)
+            ov = self._name_overrides.get((parent.module_name, key))
+            pn = ov if ov is not None else (name if self._module_shared(parent.module_name) else net.base_name)
+            items.append((k, name, pn, key, abs_drv, ov is None and pn == net.base_name and net.name_explicit))
+            name = pn
+        return items, name
 
     def _steps_for(self, net: RouteNet) -> list[Step]:
         """Bottom-up names along every chain of *net* (module-consistent)."""
         steps: list[Step] = []
         for pp in net.pairs:
-            src_dir = net.src_ep.direction
-            for side, chain, ep_port, direction in (
-                ("src", pp.src_chain, pp.pair.src.port, src_dir),
-                ("dst", pp.dst_chain, pp.pair.dst.port, pp.dst_direction),
-            ):
-                if len(chain) < 2:
+            drv = self._driving_side(net, pp)
+            sides = {"src": (pp.src_chain, pp.pair.src.port, net.src_ep.direction),
+                     "dst": (pp.dst_chain, pp.pair.dst.port, pp.dst_direction)}
+            walked = {side: self._walk(net, pp, drv, side, chain, port)
+                      for side, (chain, port, _) in sides.items() if len(chain) >= 2}
+            if pp.mode == "lca":
+                # ONE name for both sides: the class's canonical name (identical in every
+                # copy of the host, so the same annotation names its net the same way
+                # whether the wrapper is instantiated once or many times); clashes
+                # between different drivers are renamed by _resolve_name_clashes
+                hkey, _ = self._usage_key(net, pp, drv, drv, 0)
+                ov = self._name_overrides.get((pp.lca.module_name, hkey))
+                host_name = ov if ov is not None else net.base_name
+                host_explicit = ov is None and host_name == net.base_name and net.name_explicit
+            else:
+                host_name = pp.pair.dst.port if pp.mode == "dst_is_ancestor" else pp.pair.src.port
+                host_explicit = True       # the boundary port itself
+            for side, (chain, _port, direction) in sides.items():
+                if side not in walked:
                     continue          # this endpoint is the host itself (ancestor mode)
-                child_name = ep_port
-                # walk from the endpoint up to the LCA
-                for k in range(len(chain) - 1, 0, -1):
-                    child = chain[k]
-                    parent = chain[k - 1]
-                    is_host = (k - 1 == 0)
-                    if is_host:
-                        if pp.mode == "lca":
-                            parent_name = net.base_name if not self._module_shared(parent.module_name) else child_name
-                        else:
-                            parent_name = pp.pair.dst.port if pp.mode == "dst_is_ancestor" else pp.pair.src.port
-                    else:
-                        parent_name = child_name if self._module_shared(parent.module_name) else net.base_name
-                    steps.append(Step(net=net, parent=parent, child=child, child_port=child_name, parent_name=parent_name,
-                                      side=side, direction=direction, parent_is_host=is_host))
-                    child_name = parent_name
+                items, carried = walked[side]
+                for k, child_name, parent_name, key, abs_drv, explicit in items:
+                    steps.append(Step(net=net, parent=chain[k - 1], child=chain[k], child_port=child_name,
+                                      parent_name=parent_name, side=side, direction=direction, parent_is_host=False,
+                                      drv_key=key, drv_abs=abs_drv, name_explicit=explicit))
+                key, abs_drv = self._usage_key(net, pp, drv, side, 0)
+                steps.append(Step(net=net, parent=chain[0], child=chain[1], child_port=carried, parent_name=host_name,
+                                  side=side, direction=direction, parent_is_host=True,
+                                  drv_key=key, drv_abs=abs_drv, name_explicit=host_explicit))
         return steps
+
+    def _name_steps(self, nets: list[RouteNet]) -> list[Step]:
+        """Steps for all nets.  Different drivers never share a name inside one
+        module: clashing default names are made unique (see _resolve_name_clashes)."""
+        self._name_overrides = {}
+        while True:
+            steps = [s for net in nets for s in self._steps_for(net)]
+            if self.errors or not self._resolve_name_clashes(steps):
+                return steps
+
+    @staticmethod
+    def _unique_name(rel: tuple, port: str) -> str:
+        parts = [re.sub(r"\W+", "_", p).strip("_") for p in rel + (port,)]
+        return "_".join(p for p in parts if p)
+
+    def _resolve_name_clashes(self, steps: list[Step]) -> bool:
+        """Find names that one module would use for different drivers (an
+        internal driver twice, an internal driver and an input port, or one
+        input port fed by two drivers in the same instance).  Default names
+        become ``<driver path relative to the module or host>_<port>``; a
+        user-written name gives E_NET_NAME_COLLISION.  True when names changed."""
+        by_name: dict[tuple[str, str], list[Step]] = {}
+        for s in steps:
+            by_name.setdefault((s.parent.module_name, s.parent_name), []).append(s)
+        changed = False
+        for (mod, name), ss in by_name.items():
+            internal = {s.drv_key for s in ss if s.drv_key[0] == "int"}
+            fed: dict[str, set] = {}
+            for s in ss:
+                if s.drv_key[0] == "ext":
+                    fed.setdefault(s.parent.path, set()).add(s.drv_abs)
+            if not (len(internal) > 1 or (internal and fed) or any(len(v) > 1 for v in fed.values())):
+                continue
+            labels = list(dict.fromkeys(s.net.spec.label() for s in ss))
+            drivers = sorted({str(Endpoint(s.drv_abs[0], s.drv_abs[1])) if s.drv_abs else
+                              ".".join(s.parent.path.split(".") + list(s.drv_key[1])) + ":" + s.drv_key[2] for s in ss})
+            if any(s.name_explicit for s in ss) or any((mod, s.drv_key) in self._name_overrides for s in ss):
+                self._err("E_NET_NAME_COLLISION",
+                          f"{mod}: {name!r} would join different drivers ({', '.join(drivers)}) of routes "
+                          f"{' and '.join(repr(x) for x in labels)}; give them distinct 'net' names", route=labels[0])
+                continue
+            for s in ss:
+                self._name_overrides[(mod, s.drv_key)] = self._unique_name(s.drv_key[-2], s.drv_key[-1])
+            changed = True
+        return changed
 
     def _module_shared(self, module_name: str) -> bool:
         """True when several nets pass through *module_name* via distinct
@@ -470,6 +667,13 @@ class RoutePlanner:
     # ------------------------------------------------------------------
     # Phase D: strategy
     # ------------------------------------------------------------------
+
+    def _auto_inst_column(self, file_key: str) -> int:
+        """The file's effective ``auto_inst_column`` (Local Variables applied; default 40)."""
+        col = self._inst_columns.get(file_key)
+        if col is None:
+            col = self._inst_columns[file_key] = self.design.effective_config(file_key).auto_inst_column
+        return col
 
     def _struct_ok(self, mod: ModuleDef, net: RouteNet) -> bool:
         if net.kind != "struct":
@@ -867,7 +1071,7 @@ class RoutePlanner:
         sf = design.files[pm.file]
         text = sf.text
         indent_col = column_of(text, ref.conn_range.start) + 1
-        auto_col = max(40, 16 + 8 * ((indent_col + 7) // 8))
+        auto_col = max(self._auto_inst_column(sf.key), 16 + 8 * ((indent_col + 7) // 8))
         entry = f".{s.child_port}"
         pad = auto_col - indent_col
         anchor = ref.marker_range if ref.marker_range is not None else ref.dotstar_range
@@ -876,7 +1080,10 @@ class RoutePlanner:
         if anchor is not None:
             child_ports = {p.name for p in cm.ports if not p.in_auto_fence} | set(self._created_ports.get(cm.name, {}))
             explicit = {p.port for p in ref.explicit_pins} | {s.child_port}
-            followers = bool(child_ports - explicit)
+            # fenced ports may vanish on re-expansion, but a child whose header
+            # is generated by AUTOINPUT/AUTOOUTPUT/... will have ports for
+            # AUTOINST to emit after the marker (even before its first expansion)
+            followers = bool(child_ports - explicit) or cm.has_marker(*_PORT_LIST_MARKERS)
         self._queue_list_entry(sf, ref.conn_range, anchor, f"{entry} ({s.parent_name})", self._comment(net), res,
                                pad_col=pad, followers=followers, child_ports=child_ports if anchor is not None else None,
                                explicit={p.port for p in ref.explicit_pins}, kind="pin", module=pm.name, route=label,
@@ -931,7 +1138,7 @@ class RoutePlanner:
                             (parent.module_name, inst_base, port_name) not in self._planned_pins:
                         sf = design.files[parent.module.file]
                         indent_col = column_of(sf.text, ref.conn_range.start) + 1
-                        pad = max(40, 16 + 8 * ((indent_col + 7) // 8)) - indent_col
+                        pad = max(self._auto_inst_column(sf.key), 16 + 8 * ((indent_col + 7) // 8)) - indent_col
                         cm = inst.module
                         child_ports = {p.name for p in cm.ports if not p.in_auto_fence} | set(self._created_ports.get(cm.name, {})) if cm else set()
                         self._queue_list_entry(sf, ref.conn_range, ref.marker_range or ref.dotstar_range, f".{port_name} ()",

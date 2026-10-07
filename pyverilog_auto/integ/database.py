@@ -67,7 +67,9 @@ class DesignModuleDatabase(ModuleDatabase):
         mod = self._module_for(modi, key)
         if sf is None or mod is None:
             return super().get_decls(modi)
-        cache_key = (key, sf.version, mod.name)
+        # the parse depends on the *calling* file's verilog-typedef-regexp (a typedef'd
+        # port is otherwise read as an interface), so it is part of the key
+        cache_key = (key, sf.version, mod.name, self._config.typedef_regexp)
         cached = design._decls_cache.get(cache_key)
         if cached is not None:
             return cached

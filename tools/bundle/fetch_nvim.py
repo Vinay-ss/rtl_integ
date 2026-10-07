@@ -10,6 +10,7 @@ Neovim the bundles ship.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -25,8 +26,9 @@ def main(argv: list[str] | None = None) -> int:
     ns = ap.parse_args(argv)
     target = "windows-x86_64" if os.name == "nt" else "linux-x86_64"
     spec = bb._toml(bb.VERSIONS)["neovim"][target]
-    archive, _digest = bb.fetch(spec["url"], ns.cache, spec["sha256"])
-    bb.extract(archive, ns.dest)
+    with contextlib.redirect_stdout(sys.stderr):           # stdout carries only the path
+        archive, _digest = bb.fetch(spec["url"], ns.cache, spec["sha256"])
+        bb.extract(archive, ns.dest)
     exe = next(p for p in ns.dest.rglob("nvim.exe" if os.name == "nt" else "nvim")
                if p.is_file() and p.parent.name == "bin")
     if os.name != "nt":

@@ -25,9 +25,11 @@ print(s["url"], s["sha256"])
 EOF
 )
 
+echo "image compiler: $(gcc --version | head -1)"
 if [ "$(gcc -dumpversion | cut -d. -f1)" -lt 11 ]; then
     for v in 13 12 11; do
-        if yum install -y -q "devtoolset-$v-gcc-c++" >/dev/null 2>&1; then
+        echo "trying devtoolset-$v"
+        if yum install -y -q "devtoolset-$v-gcc-c++" 2>&1 | tail -5 && [ -f "/opt/rh/devtoolset-$v/enable" ]; then
             # shellcheck disable=SC1090
             source "/opt/rh/devtoolset-$v/enable"
             break
@@ -36,7 +38,8 @@ if [ "$(gcc -dumpversion | cut -d. -f1)" -lt 11 ]; then
 fi
 major=$(gcc -dumpversion | cut -d. -f1)
 if [ "$major" -lt 11 ]; then
-    echo "build_pyslang_wheel: slang needs GCC 11 or newer, found $(gcc -dumpversion)" >&2
+    echo "build_pyslang_wheel: slang needs GCC 11 or newer, found $(gcc -dumpversion); available:" >&2
+    yum list available 'devtoolset-*-gcc-c++' 2>&1 | tail -10 >&2
     exit 1
 fi
 echo "compiler: $(gcc --version | head -1)"

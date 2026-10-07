@@ -30,7 +30,7 @@ jobs:
         run: echo "RTL_INTEG_NVIM=$(python tools/bundle/fetch_nvim.py --dest "$RUNNER_TEMP/nvim")" >> "$GITHUB_ENV"
 
       - name: Unit, integration, routing and GUI tests
-        run: python -m pytest tests --ignore=tests/test_golden.py --ignore=tests/test_golden_autoinst.py -q -p no:cacheprovider
+        run: python tools/bundle/ci_run.py -- python -m pytest tests --ignore=tests/test_golden.py --ignore=tests/test_golden_autoinst.py -q -p no:cacheprovider -rfE
 
       # The Emacs golden suite has 50 documented pre-existing failures (tests/baseline_failures.txt,
       # compare locally with tools/check_baseline.py); run it for visibility without failing the build.

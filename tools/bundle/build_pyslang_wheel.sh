@@ -7,8 +7,9 @@
 #       bash /io/tools/bundle/build_pyslang_wheel.sh /io/wheelhouse
 #
 # The sdist URL and sha256 come from versions.toml.  slang needs a C++20
-# compiler (GCC 11+); the image ships an older devtoolset, so a newer one is
-# installed from the CentOS SCL repositories first.
+# compiler (GCC 11+); the image ships an older devtoolset, so devtoolset-11
+# (the newest in the CentOS 7 SCL repositories) is installed first, and
+# pyslang_gcc11_compat.h supplies the one library piece GCC 11 lacks.
 set -euo pipefail
 
 out=${1:-wheelhouse}
@@ -27,22 +28,19 @@ EOF
 
 echo "image compiler: $(gcc --version | head -1)"
 if [ "$(gcc -dumpversion | cut -d. -f1)" -lt 11 ]; then
-    for v in 13 12 11; do
-        echo "trying devtoolset-$v"
-        if yum install -y -q "devtoolset-$v-gcc-c++" 2>&1 | tail -5 && [ -f "/opt/rh/devtoolset-$v/enable" ]; then
-            # shellcheck disable=SC1090
-            source "/opt/rh/devtoolset-$v/enable"
-            break
-        fi
-    done
+    yum install -y -q devtoolset-11-gcc-c++ 2>&1 | grep -v -e '^install-info' -e SELinux || true
+    # shellcheck disable=SC1091
+    [ -f /opt/rh/devtoolset-11/enable ] && source /opt/rh/devtoolset-11/enable
 fi
 major=$(gcc -dumpversion | cut -d. -f1)
 if [ "$major" -lt 11 ]; then
-    echo "build_pyslang_wheel: slang needs GCC 11 or newer, found $(gcc -dumpversion); available:" >&2
-    yum list available 'devtoolset-*-gcc-c++' 2>&1 | tail -10 >&2
+    echo "build_pyslang_wheel: slang needs GCC 11 or newer, found $(gcc -dumpversion)" >&2
     exit 1
 fi
-echo "compiler: $(gcc --version | head -1)"
+if [ "$major" -lt 12 ]; then
+    export CXXFLAGS="${CXXFLAGS:-} -include $here/pyslang_gcc11_compat.h"
+fi
+echo "compiler: $(gcc --version | head -1)  CXXFLAGS=${CXXFLAGS:-}"
 
 work=$(mktemp -d)
 curl -fsSL "$url" -o "$work/pyslang.tar.gz"

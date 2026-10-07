@@ -26,7 +26,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: wheelhouse
-          key: pyslang-manylinux2014-${{ hashFiles('tools/bundle/versions.toml', 'tools/bundle/build_pyslang_wheel.sh') }}
+          key: pyslang-manylinux2014-${{ hashFiles('tools/bundle/versions.toml', 'tools/bundle/build_pyslang_wheel.sh', 'tools/bundle/pyslang_gcc11_compat.h') }}
 
       # docker run instead of a job container: the actions themselves need a newer glibc
       - name: Build in manylinux2014

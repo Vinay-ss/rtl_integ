@@ -1,0 +1,8 @@
+package tp;
+  typedef enum logic [1:0] {S0, S1, S2} e_t;
+  typedef logic [3:0][7:0] v_t;
+  typedef struct {
+    logic [3:0] a;
+    int         b;
+  } r_t;
+endpackage

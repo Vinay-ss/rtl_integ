@@ -39,6 +39,12 @@ def proj_param(tmp_path) -> Path:
 
 
 @pytest.fixture
+def proj_typed(tmp_path) -> Path:
+    """Leaves with enum, int, package typedef and signed ports joined by implicit nets."""
+    return copy_fixture(tmp_path, "proj_typed")
+
+
+@pytest.fixture
 def proj_pl(tmp_path) -> Path:
     """Perl-template fixture project."""
     return copy_fixture(tmp_path, "proj_pl")

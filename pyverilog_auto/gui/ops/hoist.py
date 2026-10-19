@@ -27,7 +27,8 @@ from ...integ.model import Instance, ModuleDef
 from ..build import OutputInfo
 from ..connect import ConnectError, InstUse, ModuleIndex, package_names
 from ..srcmap import CODE, GUARDED, LITERAL, LOOP, SUBST, Statement
-from .common import OpError, Plan, Question, capture_values, free_variables, indent_of, literal_safe, unique_name
+from .common import (OpError, Plan, Question, capture_values, free_variables, indent_of, literal_safe, port_net_type,
+                     unique_name)
 from .units import drop_empty_guards, header_lines, marker_of, terminator_lines
 from .textops import (_conn_list, add_pins, fold_constants, full_select_base, needs_parens, port_list_span,
                       remove_pin, rewrite_param, rewrite_pin, subst_identifiers)
@@ -222,7 +223,8 @@ class HoistPlanner:
             if stX.cls == GUARDED:
                 drop_empty_guards(plan, outW, stX.guards, deleted, wlines, tW)
             self._delete_w_decls(W, outW, ixW, local + shared, shared, deleted)
-            hdr_note = self._edit_w_header(W, outW, ixW, removed, added, deleted, auto_hdr)
+            implicit = {n: self._x_port_type(X, uX, n) for n in added if n not in ixW.decls}
+            hdr_note = self._edit_w_header(W, outW, ixW, removed, added, implicit, deleted, auto_hdr)
 
         # -- parent edits (one per instantiation statement of W) -------------------------
         per_parent: dict[str, int] = {}
@@ -391,7 +393,10 @@ class HoistPlanner:
             deleted.append(span)
 
     def _edit_w_header(self, W: ModuleDef, outW: OutputInfo, ixW: ModuleIndex, removed: list[str],
-                       added: dict[str, str], deleted: list[tuple[int, int]], auto_hdr: bool) -> Optional[str]:
+                       added: dict[str, str], implicit: dict[str, tuple[str, str, str]],
+                       deleted: list[tuple[int, int]], auto_hdr: bool) -> Optional[str]:
+        """Remove and add W's ports; *implicit* holds the type and dims of
+        each added port that is an implicit net of W."""
         if not removed and not added:
             return None
         gm = self.sm.gen_module(W.name)
@@ -420,10 +425,14 @@ class HoistPlanner:
         if not auto_hdr:
             for n, direction in added.items():
                 d = ixW.decls.get(n)
-                typ = d.full_type if d is not None and d.full_type else "logic"
+                if d is not None:
+                    typ, unpacked = d.full_type or "logic", d.unpacked
+                else:
+                    t, dims, unpacked = implicit.get(n, ("logic", "", ""))
+                    typ = f"{t} {dims}".strip()
                 if direction == "inout" and typ.startswith("logic"):
                     typ = "wire" + typ[len("logic"):]
-                keep.append(_aligned_entry(entries, direction, typ, n + (d.unpacked if d else "")))
+                keep.append(_aligned_entry(entries, direction, typ, n + unpacked))
         sep = ",\n" + _entry_indent(text, op) if "\n" in text[op:cl] else ", "
         new_inner = sep.join(e.strip() for e in keep if e.strip())
         tail = "\n" + _entry_indent(text, op) if keep and text[op + 1:cl].rstrip(" ").endswith("\n") else ""
@@ -477,8 +486,7 @@ class HoistPlanner:
                 unpacked = fold_constants(subst_identifiers(d.unpacked, mapping))
                 typ = d.type_text or "logic"
             else:
-                dims, unpacked = self._x_port_dims(X, uX, n)
-                typ = "logic"
+                typ, dims, unpacked = self._x_port_type(X, uX, n)
             decl_lines.append(f"{typ} {dims} {net}{unpacked};".replace("  ", " ").replace(" ;", ";"))
         port_expr: dict[str, str] = {}
         for p in ports:
@@ -577,15 +585,16 @@ class HoistPlanner:
         for wi in c.insts:
             plan.renames[f"{wi.path}.{X.name}"] = f"{wi.parent.path}.{c.x_name}"
 
-    def _x_port_dims(self, X: Instance, uX: InstUse, n: str) -> tuple[str, str]:
+    def _x_port_type(self, X: Instance, uX: InstUse, n: str) -> tuple[str, str, str]:
+        """Type and dims of the implicit net *n* of W: those of the port of X it connects to."""
         for pin in uX.pins:
             if pin.expr.strip() == n:
                 try:
                     ep = self.design.port_at(X, pin.port)
                 except Exception:
-                    return "", ""
-                return ep.packed_dims_numeric, ep.unpacked_dims_numeric
-        return "", ""
+                    return "logic", "", ""
+                return port_net_type(ep)
+        return "logic", "", ""
 
 
 def _split_entries(inner: str) -> list[str]:

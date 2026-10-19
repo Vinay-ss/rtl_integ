@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from pyverilog_auto.gui.ops import OpsManager
 from pyverilog_auto.gui.ops.textops import add_pins, fold_constants, remove_pin, rewrite_pin, subst_identifiers
 from pyverilog_auto.gui.session import Session
-from pyverilog_auto.gui.verify import verify_designs
+from pyverilog_auto.gui.verify import elab_messages, verify_designs
 
 
 def _open(root):
@@ -100,6 +102,22 @@ def test_hoist_route_demo_auto_ports_and_routes(proj_route, slang):
     assert "instC" not in (proj_route / "src" / "core_a.sv").read_text().split("module core_a")[1]
     paths = [i.path for i in s.result.design.all_instances()]
     assert "top.instC" in paths and "top.coreA.instD" in paths
+
+
+def test_hoist_declares_implicit_nets_with_the_port_type(proj_typed, slang):
+    # blk's n_* nets are implicit: the parent's nets and blk's new ports get
+    # the type of u_src's ports (an enum, not logic [1:0], so u_dst's enum
+    # input needs no cast)
+    s, ops = _open(proj_typed)
+    _do(ops, ops.plan_hoist("top.u_w.u_src"))
+    top = (proj_typed / "tpl" / "top.svp").read_text()
+    blk = (proj_typed / "tpl" / "blk.svp").read_text()
+    for n, t in {"n_e": "tp::e_t", "n_ea": "tp::e_t [2:0]", "n_i": "int", "n_u": "int unsigned", "n_v": "tp::v_t",
+                 "n_r": "tp::r_t", "n_s": "logic signed [7:0]", "n_f": "logic"}.items():
+        assert f"  {t} {n};" in top, (n, top)
+        assert re.search(rf"input +{re.escape(t)} +{n}\b", blk), (n, blk)
+    assert "  int n_cnt;" in top and "n_cnt" not in blk     # used by u_src only
+    assert elab_messages(s.result.design) == []
 
 
 @pytest.mark.parametrize("path,code", [

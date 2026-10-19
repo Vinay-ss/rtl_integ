@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
 from pyverilog_auto.gui.ops import OpsManager
 from pyverilog_auto.gui.session import Session, SessionError
+from pyverilog_auto.gui.verify import elab_messages
 from pyverilog_auto.prepro import find_perl
 
 needs_perl = pytest.mark.skipif(find_perl() is None, reason="no perl interpreter")
@@ -94,6 +96,33 @@ def test_wrap_auto_style_with_interface(proj_auto, slang):
     integ = (proj_auto / "build" / "integ" / "top.sv").read_text()
     assert ".bus                   (bus)" in integ
     assert "From u_pq of pq_wrap" in integ                # AUTOWIRE now sees the wrapper
+
+
+_TYPED_NETS = {"n_e": "tp::e_t", "n_ea": "tp::e_t [2:0]", "n_i": "int", "n_u": "int unsigned", "n_v": "tp::v_t",
+               "n_r": "tp::r_t", "n_s": "logic signed [7:0]", "n_f": "logic"}
+
+
+def test_wrap_declares_implicit_nets_with_the_port_type(proj_typed, slang):
+    # blk's n_* nets are implicit (1-bit): slang rejects them on the enum
+    # and struct inputs.  The wrapper declares each with the type of the port
+    # it connects to, so an enum net drives an enum input without a cast.
+    s, ops = _open(proj_typed)
+    plan = ops.plan_wrap(["top.u_w.u_src"], "s_wrap", "u_sw")
+    assert plan["ok"], plan["diagnostics"]
+    assert ops.apply(plan["id"])["verified"] is True
+    wrapper = (proj_typed / "tpl" / "s_wrap.svp").read_text()
+    for n, t in _TYPED_NETS.items():
+        assert re.search(rf"output {re.escape(t)} +{n}[,)]", wrapper), (n, wrapper)
+    assert "  int n_cnt;" in wrapper                      # used by u_src only
+    ops.undo()
+
+    plan = ops.plan_wrap(["top.u_w.u_src", "top.u_w.u_dst"], "sd_wrap", "u_sd")
+    assert plan["ok"], plan["diagnostics"]
+    assert ops.apply(plan["id"])["verified"] is True
+    wrapper = (proj_typed / "tpl" / "sd_wrap.svp").read_text()
+    for n, t in _TYPED_NETS.items():
+        assert f"  {t} {n};" in wrapper, (n, wrapper)
+    assert elab_messages(s.result.design) == []
 
 
 @needs_perl

@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from ...integ.model import ElaboratedPort
 from ...prepro import Construct, PreproError, preprocess_text
 from ...prepro.linemap import LineMap
 from ..build import OutputInfo
@@ -248,3 +249,22 @@ def identifiers(text: str) -> list[str]:
         if m.group(0) not in out:
             out.append(m.group(0))
     return out
+
+
+def port_net_type(ep: ElaboratedPort) -> tuple[str, str, str]:
+    """Type, packed and unpacked dims of a net declared in another module
+    for the elaborated port *ep* (an implicit net the operation declares).
+
+    As RoutePlanner writes a parameter-dependent route: the named type where
+    other modules can see it (``int``, ``int unsigned``, ``pkg::e_t`` with
+    its elaborated dims ``[2:0]``, ``pkg::pkt_t``), so an enum net can still
+    drive an enum input; else ``logic`` with the signing and elaborated dims
+    of the port (a scalar has none)."""
+    if ep.kind == "struct" and not ep.struct_is_local and "::" in (ep.struct_qualified_name or ""):
+        return ep.struct_qualified_name, "", ""
+    if ep.type_name:
+        return ep.type_name, ep.type_dims_numeric, ep.type_unpacked_numeric
+    packed = ep.packed_dims_numeric
+    if packed == "[0:0]" and not ep.symbolic_packed_dims:
+        packed = ""
+    return ("logic signed" if ep.is_signed else "logic"), packed, ep.unpacked_dims_numeric

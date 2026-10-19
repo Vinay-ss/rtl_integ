@@ -37,7 +37,7 @@ from ..connect import ConnectError, Decl, InstUse, ModuleIndex
 from ..project import Binding, SourceEntry, TemplateEntry, append_template_entry_text
 from ..srcmap import CODE, GUARDED, LITERAL, LOOP, SUBST, Statement
 from .common import (OpError, Plan, Question, capture_values, free_variables, identifiers, indent_of,
-                     literal_safe, unique_name)
+                     literal_safe, port_net_type, unique_name)
 from .textops import rewrite_pin
 from .units import (Unit, construct_span, drop_empty_guards, first_printed, gen_text, header_lines, marker_of,
                     output_range, terminator_lines)
@@ -538,7 +538,7 @@ class WrapPlanner:
             if d.kind == "port" and not t:
                 t = "wire" if d.direction != "output" else "logic"
             return t or "logic", d.dims, d.unpacked
-        # implicit net (no declaration): elaborated width of the first child port it connects to
+        # implicit net (no declaration): elaborated type of the first child port it connects to
         for u, p in pins:
             inst = self._inst_of_use(u)
             if inst is None:
@@ -550,7 +550,7 @@ class WrapPlanner:
             if ep.kind == "iface":
                 return ep.iface_type or "", "", ""
             if p.expr.strip() == n:
-                return "logic", ep.packed_dims_numeric, ep.unpacked_dims_numeric
+                return port_net_type(ep)
         return "logic", "", ""
 
     def _carry_or_freeze(self, out: OutputInfo, units: list[Unit]) -> tuple[list[list[str]], Optional[Binding]]:

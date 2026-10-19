@@ -183,13 +183,18 @@ of an enum declared in the parent is refused (move the enum into a package).
 Template text moves verbatim, so tokens, `/*AUTOINST*/` and template blocks
 stay live.  Template variables are carried (bound to the parent's values) or,
 when that is not possible, frozen on request.  Outputs that drive only part of
-an outside net get their own port.
+an outside net get their own port.  A name the parent never declares (an
+implicit net) is declared with the type of the instance port it connects to:
+`int`, `int unsigned`, a package typedef (`pkg::e_t [2:0]`) or package struct
+by name, so an enum net still drives an enum input; otherwise `logic`
+(`signed` kept) with the port's elaborated dims.
 Port naming: `net` (port = parent net name) or `inst_port` (`<inst>_<port>`).
 
 **Hoist** (`H` on an instance inside a wrapper): applies to every instance of
 the wrapper.  Wrapper ports and parameters it used are replaced by what each
 parent connects; nets it shared with siblings become new wrapper ports; ports
-nobody else uses are removed.  AUTOINPUT/AUTOOUTPUT headers regenerate by
+nobody else uses are removed.  Implicit nets of the wrapper are typed from the
+hoisted instance's ports, as for wrap.  AUTOINPUT/AUTOOUTPUT headers regenerate by
 themselves.  An emptied wrapper can be dissolved (file, project entry and
 instances removed).
 

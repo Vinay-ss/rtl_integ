@@ -416,10 +416,10 @@ def build(target: str, out_dir: Path, cache: Path, *, neovide: bool, update_pins
             p = stage / tool
             p.write_text(LAUNCH_SH.format(mod=mod), newline="\n")
             make_executable(p)
-    launcher = "rtl-integ-gui.cmd" if os_name == "windows" else "./rtl-integ-gui"
+    launcher = ".\\rtl-integ-gui.cmd" if os_name == "windows" else "./rtl-integ-gui"
     (stage / "README.txt").write_text(README.format(
         version=version, target=target, repo=REPO_URL, launcher=launcher, ui_note=UI_NOTE[os_name],
-        prepro="prepro3.cmd" if os_name == "windows" else "./prepro3",
+        prepro=".\\prepro3.cmd" if os_name == "windows" else "./prepro3",
         python=pins["python"]["version"], neovim=pins["neovim"]["version"],
         neovide=pins["neovide"]["version"] if neovide else "(not included)",
         pyslang=pins["pyslang"]["version"] + note),

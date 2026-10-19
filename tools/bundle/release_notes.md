@@ -27,7 +27,7 @@ Nothing else needs to be installed; Perl is needed only for Perl (`// pl`) templ
 | `*-third-party-sources.tar.gz` | sources of the LGPL parts inside the bundles |
 | `SHA256SUMS` | checksums of all files |
 
-**Windows:** right-click the zip, Properties, tick *Unblock*, then extract it and run `rtl-integ-gui.cmd --demo`.
+**Windows:** right-click the zip, Properties, tick *Unblock*, then extract it and run `.\rtl-integ-gui.cmd --demo`.
 The files are not code-signed, so SmartScreen may ask once.
 
 **Linux:** `tar xzf rtl-integ-gui-*-linux-x86_64.tar.gz` and run `./rtl-integ-gui-*/rtl-integ-gui --demo`,

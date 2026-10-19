@@ -47,7 +47,7 @@ needs to be installed (Perl only for Perl templates):
 | `rtl-integ-gui-<ver>-1.x86_64.rpm`, `rtl-integ-gui_<ver>-1_amd64.deb` | the same, installed to `/opt/rtl-integ-gui` with `rtl-integ-gui` on PATH |
 
 ```bash
-rtl-integ-gui --demo            # a copy of the demo project (rtl-integ-gui.cmd on Windows)
+rtl-integ-gui --demo            # a copy of the demo project (.\rtl-integ-gui.cmd on Windows)
 rtl-integ-gui path/to/project   # a directory with rtl_integ_project.toml
 rtl-integ-gui --selftest        # check the installation
 ```

@@ -28,7 +28,7 @@ leaf instances must stay connected exactly as before.
 * Bundle (no installation): from the
   [Releases](https://github.com/Vinay-ss/rtl_integ/releases) page, unpack
   `rtl-integ-gui-<ver>-<target>` and run `rtl-integ-gui PROJECT_DIR`
-  (Windows: `rtl-integ-gui.cmd`), or install the Linux `.rpm`/`.deb`.
+  (Windows: `.\rtl-integ-gui.cmd`), or install the Linux `.rpm`/`.deb`.
 * From the repository: `pip install -e ".[gui]"`, Neovim 0.10+ on PATH (or
   `RTL_INTEG_NVIM`), optionally Neovide; then `rtl-integ-gui PROJECT_DIR`.
 

@@ -2,6 +2,20 @@ Self-contained downloads of **rtl-integ-gui**, the Neovim-based GUI for browsing
 template-generated RTL (wrap instances into a wrapper, hoist them out, edits go into the prepro templates).
 Nothing else needs to be installed; Perl is needed only for Perl (`// pl`) templates.
 
+### New in 0.3.1
+
+- **Filelists** (`-f`): paths must now be absolute: `/proj/rtl/a.sv`, `$PROJ/rtl/a.sv`, `${PROJ}/rtl/a.sv`
+  or `~/rtl/a.sv`. A relative path, or a variable that is not set, is an error that names the file and
+  line. For a filelist with relative paths add `--relative-to filelist` (relative to the filelist) or
+  `--relative-to cwd` (relative to the current directory); `rtl-integ-gui -f FILE` takes the same option.
+  Paths inside a file named by `-F` stay relative to that file.
+- **Routing**: running a route again no longer fails with `E_TYPE_MISMATCH` when the source port's width
+  uses a parameter; ports with several parameter-dependent dimensions keep all of them; `int`, enum and
+  typedef ports are routed with their own type instead of a 1-bit `logic`.
+- **Wrap / hoist**: nets the module never declared are declared with the type of the port they connect
+  to (enum, `int`, package typedefs, `signed`), so the result elaborates.
+- **Windows**: the instructions now use `.\rtl-integ-gui.cmd`, which PowerShell needs.
+
 ### New in 0.3.0
 
 - **Toolbar**: switch the source view (Template / Generated / Integrated), the hierarchy labels and the

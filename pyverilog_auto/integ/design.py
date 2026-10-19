@@ -80,7 +80,8 @@ class Design:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_filelist(cls, path: str, *, relative_to: str = "cwd", extra_files: Iterable[str] = (), **kw) -> "Design":
+    def from_filelist(cls, path: str, *, relative_to: str = "absolute", extra_files: Iterable[str] = (),
+                      **kw) -> "Design":
         fl = parse_filelist(path, relative_to=relative_to)  # type: ignore[arg-type]
         if extra_files:
             fl.merge(Filelist.from_args(list(extra_files)))
@@ -128,6 +129,8 @@ class Design:
 
     def _build(self) -> None:
         fl = self.filelist
+        for msg in fl.errors:
+            self.diagnostics.append(Diag("error", msg, None, None, "filelist"))
         for e in fl.missing:
             self.diagnostics.append(Diag("error", f"not found: {e.token}", e.origin, e.line or None, "filelist"))
         for e in fl.unknown:

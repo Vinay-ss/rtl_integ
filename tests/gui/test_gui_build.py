@@ -231,9 +231,12 @@ def test_view_only_session(tmp_path, slang):
     top.write_text("module t; stage u_s (.clk(), .rst_n(), .d(), .q(), .busy()); endmodule\n")
     fl = tmp_path / "d.f"
     fl.write_text(f"{src}\nt.sv\n")
+    # paths inside a filelist must be absolute unless relative_to says otherwise
+    bad = Session().open(filelist=str(fl), top="t")
+    assert not bad["ok"] and bad["errors"] >= 1
     s = Session()
-    summary = s.open(filelist=str(fl), top="t")
-    assert summary["view_only"] and summary["top"] == ["t"]
+    summary = s.open(filelist=str(fl), top="t", relative_to="filelist")
+    assert summary["ok"] and summary["view_only"] and summary["top"] == ["t"]
     loc = s.locate("t.u_s", what="inst")
     assert loc["view"] == "integ" and loc["fallback"]
     child = s.tree()["roots"][0]["children"][0]

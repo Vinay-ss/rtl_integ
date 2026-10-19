@@ -138,6 +138,7 @@ class Project:
     templates: list[TemplateEntry] = field(default_factory=list)
     sources: list[SourceEntry] = field(default_factory=list)
     filelist: Optional[str] = None   # view-only: the user's filelist
+    relative_to: str = "absolute"    # view-only: paths inside it (absolute | cwd | filelist)
     wrap: WrapSettings = field(default_factory=WrapSettings)
 
     # -- paths ----------------------------------------------------------
@@ -321,11 +322,15 @@ def load_project(path: str) -> Project:
     return proj
 
 
-def view_only_project(filelist: str, *, top: Optional[str] = None) -> Project:
+def view_only_project(filelist: str, *, top: Optional[str] = None, relative_to: Optional[str] = None) -> Project:
     """A project over an existing filelist: browse only, no template edits."""
     filelist = os.path.abspath(filelist)
     root = os.path.dirname(filelist)
-    return Project(path=None, root=root, top=[top] if top else [], build_dir="", filelist=filelist)
+    relative_to = relative_to or "absolute"
+    if relative_to not in ("absolute", "cwd", "filelist"):
+        raise ProjectError("relative_to must be 'cwd' or 'filelist'")
+    return Project(path=None, root=root, top=[top] if top else [], build_dir="", filelist=filelist,
+                   relative_to=relative_to)
 
 
 # ----------------------------------------------------------------------

@@ -185,8 +185,9 @@ def _add_design_args(parser: argparse.ArgumentParser) -> None:
         metavar="REGEX", help="Treat files matching REGEX as source files (expanded)",
     )
     parser.add_argument(
-        "--relative-to", choices=("cwd", "filelist"), default="cwd",
-        help="Resolve relative paths inside -f files against cwd (default) or the filelist",
+        "--relative-to", choices=("cwd", "filelist"), default="absolute",
+        help="Allow relative paths inside -f files, resolved against cwd or the filelist's directory "
+             "(default: paths must be absolute, e.g. $PROJ/rtl/a.sv)",
     )
     parser.add_argument(
         "--warn-fatal", action="store_true",

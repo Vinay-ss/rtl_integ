@@ -62,7 +62,7 @@ def build_design(args: argparse.Namespace) -> Optional[Design]:
     problems = fl.problems()
     for p in problems:
         print(f"error: {p}", file=sys.stderr)
-    if problems and args.strict:
+    if fl.errors or (problems and args.strict):
         return None
     if not fl.sources and not fl.library_files:
         print("error: no input files (give FILE... or -f FILELIST)", file=sys.stderr)

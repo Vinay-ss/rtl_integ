@@ -6,6 +6,9 @@ synthesis tools:
 * one or more tokens per line, ``//`` and ``#`` line comments, ``/* */``
   block comments, ``"..."``/``'...'`` quoting for paths with spaces,
   backslash-newline continuation, ``$VAR``/``${VAR}`` expansion;
+* paths must be absolute (``/proj/rtl/a.sv``, ``$PROJ/rtl/a.sv``,
+  ``~/a.sv``) unless the file is read with ``relative_to="cwd"`` or
+  ``"filelist"``; a relative path or an undefined variable is an error;
 * ``-f FILE`` (nested, paths resolved with the same policy as the parent),
   ``-F FILE`` (nested, paths resolved relative to the nested file's directory);
 * ``-y DIR``, ``-v FILE``, ``-I DIR`` / ``-IDIR`` / ``+incdir+A+B``,
@@ -31,7 +34,12 @@ if TYPE_CHECKING:
 
 DEFAULT_LIBEXTS: list[str] = [".v", ".va", ".sv"]
 
-RelativeTo = Literal["cwd", "filelist"]
+# "absolute": paths inside a filelist must be absolute (after $VAR and ~
+# expansion); "cwd" / "filelist": relative paths resolve against the current
+# directory / the filelist's own directory.
+RelativeTo = Literal["absolute", "cwd", "filelist"]
+RELATIVE_TO = ("absolute", "cwd", "filelist")
+RELATIVE_HINT = "use --relative-to filelist or --relative-to cwd"
 
 # Flags that take the next token as an argument.
 _TWO_ARG_FLAGS = {"-f", "-F", "-v", "-y", "-I", "--top", "-top", "-l", "-o", "-work"}
@@ -48,6 +56,8 @@ _IGNORED_PREFIXES = (
 )
 
 _GLOB_CHARS = re.compile(r"[*?\[]")
+# A variable that os.path.expandvars left alone: it is not defined.
+_UNDEFINED_VAR = re.compile(r"\$(?:\{\w+\}|\w+)")
 
 
 @dataclass(frozen=True)
@@ -75,6 +85,7 @@ class Filelist:
     tops: list[str] = field(default_factory=list)           # --top / -top
     unknown: list[FilelistEntry] = field(default_factory=list)   # unrecognised flags (warnings)
     missing: list[FilelistEntry] = field(default_factory=list)   # referenced paths that do not exist (errors)
+    errors: list[str] = field(default_factory=list)          # relative paths, undefined variables (fatal)
     warnings: list[str] = field(default_factory=list)
     visited: list[str] = field(default_factory=list)        # normcase paths of -f/-F files (cycle guard)
 
@@ -133,6 +144,7 @@ class Filelist:
             _append_unique_str(self.tops, t)
         self.unknown.extend(other.unknown)
         self.missing.extend(other.missing)
+        self.errors.extend(other.errors)
         self.warnings.extend(other.warnings)
         for v in other.visited:
             _append_unique_str(self.visited, v)
@@ -153,15 +165,36 @@ class Filelist:
         return out
 
     def problems(self) -> list[str]:
-        """Human-readable error messages (missing files/dirs)."""
-        return [f"{e.where()}: not found: {e.token}" for e in self.missing]
+        """Human-readable error messages (bad paths, missing files/dirs)."""
+        return self.errors + [f"{e.where()}: not found: {e.token}" for e in self.missing]
 
     # ------------------------------------------------------------------
     # Internal adders (shared by the token parser and from_args)
     # ------------------------------------------------------------------
 
-    def _add_source(self, tok: str, base_dir: str, entry: FilelistEntry) -> None:
-        path = _resolve(tok, base_dir)
+    def _path(self, tok: str, base_dir: Optional[str], entry: FilelistEntry) -> Optional[str]:
+        """*tok* as a normalized absolute path, or ``None`` after recording why not.
+
+        *base_dir* ``None`` means relative paths are not allowed (the
+        ``"absolute"`` policy).
+        """
+        m = _UNDEFINED_VAR.search(tok)
+        if m:
+            self.errors.append(f"{entry.where()}: undefined environment variable {m.group(0)} in {tok}")
+            return None
+        p = os.path.expanduser(tok)
+        if not os.path.isabs(p):
+            if base_dir is None:
+                self.errors.append(f"{entry.where()}: relative path {tok}: filelist paths must be absolute "
+                                   f"or start with $VAR ({RELATIVE_HINT})")
+                return None
+            p = os.path.join(base_dir, p)
+        return os.path.normpath(p)
+
+    def _add_source(self, tok: str, base_dir: Optional[str], entry: FilelistEntry) -> None:
+        path = self._path(tok, base_dir, entry)
+        if path is None:
+            return
         if _GLOB_CHARS.search(tok):
             hits = sorted(glob.glob(path))
             if not hits:
@@ -175,15 +208,19 @@ class Filelist:
             return
         _append_unique_path(self.sources, path)
 
-    def _add_file(self, target: list[str], tok: str, base_dir: str, entry: FilelistEntry) -> None:
-        path = _resolve(tok, base_dir)
+    def _add_file(self, target: list[str], tok: str, base_dir: Optional[str], entry: FilelistEntry) -> None:
+        path = self._path(tok, base_dir, entry)
+        if path is None:
+            return
         if not os.path.isfile(path):
             self.missing.append(entry)
             return
         _append_unique_path(target, path)
 
-    def _add_dir(self, target: list[str], tok: str, base_dir: str, entry: FilelistEntry) -> None:
-        path = _resolve(tok, base_dir)
+    def _add_dir(self, target: list[str], tok: str, base_dir: Optional[str], entry: FilelistEntry) -> None:
+        path = self._path(tok, base_dir, entry)
+        if path is None:
+            return
         if not os.path.isdir(path):
             self.missing.append(entry)
         # Keep it anyway: slang tolerates missing include dirs and the user may
@@ -269,20 +306,22 @@ def tokenize_filelist_text(text: str) -> list[tuple[str, int]]:
 
 def parse_flag_tokens(
     tokens: list[tuple[str, int]],
-    base_dir: str,
+    base_dir: Optional[str],
     origin: str,
     fl: Optional[Filelist] = None,
     *,
-    relative_to: RelativeTo = "cwd",
+    relative_to: RelativeTo = "absolute",
     cwd: Optional[str] = None,
 ) -> Filelist:
     """Interpret filelist *tokens* into *fl* (created when ``None``).
 
-    *base_dir* is the directory relative paths are resolved against.  For
-    nested ``-f`` files the policy *relative_to* decides whether their
-    contents resolve against *cwd* (default) or the nested file's directory;
-    ``-F`` always uses the nested file's directory.
+    *base_dir* is the directory relative paths are resolved against; ``None``
+    makes a relative path an error.  For nested ``-f`` files the policy
+    *relative_to* decides: absolute paths only (default), relative to *cwd*,
+    or relative to the nested file's directory; ``-F`` always uses the nested
+    file's directory.
     """
+    _check_policy(relative_to)
     fl = fl if fl is not None else Filelist()
     cwd = cwd or os.getcwd()
     i = 0
@@ -303,7 +342,9 @@ def parse_flag_tokens(
             if tok in _IGNORED_TWO_ARG:
                 continue
             if tok in ("-f", "-F"):
-                path = _resolve(arg, base_dir)
+                path = fl._path(arg, base_dir, arg_entry)
+                if path is None:
+                    continue
                 if not os.path.isfile(path):
                     fl.missing.append(arg_entry)
                     continue
@@ -314,7 +355,7 @@ def parse_flag_tokens(
                 if tok == "-F":
                     nested_base = os.path.dirname(path)
                 else:
-                    nested_base = cwd if relative_to == "cwd" else os.path.dirname(path)
+                    nested_base = _base_dir(relative_to, path, cwd)
                 _parse_file_into(fl, path, nested_base, relative_to=relative_to, cwd=cwd)
             elif tok == "-v":
                 fl._add_file(fl.library_files, arg, base_dir, arg_entry)
@@ -375,7 +416,7 @@ def parse_flag_tokens(
 def _parse_file_into(
     fl: Filelist,
     path: str,
-    base_dir: str,
+    base_dir: Optional[str],
     *,
     relative_to: RelativeTo,
     cwd: str,
@@ -392,24 +433,26 @@ def _parse_file_into(
 def parse_filelist(
     path: str,
     *,
-    relative_to: RelativeTo = "cwd",
+    relative_to: RelativeTo = "absolute",
     fl: Optional[Filelist] = None,
     cwd: Optional[str] = None,
 ) -> Filelist:
     """Read a ``-f`` style filelist at *path* into a :class:`Filelist`.
 
-    With ``relative_to="cwd"`` (default, matching most simulators) relative
-    paths inside the file are resolved against the current directory; with
-    ``"filelist"`` they resolve against the filelist's own directory.
+    *path* itself may be relative to the current directory.  With
+    ``relative_to="absolute"`` (default) every path inside the file must be
+    absolute after ``$VAR``/``~`` expansion, and a relative one is recorded
+    in ``errors``; with ``"cwd"`` relative paths resolve against the current
+    directory, with ``"filelist"`` against the filelist's own directory.
     """
+    _check_policy(relative_to)
     fl = fl if fl is not None else Filelist()
     cwd = cwd or os.getcwd()
     path = os.path.normpath(os.path.join(cwd, os.path.expanduser(os.path.expandvars(path))))
     if not os.path.isfile(path):
         fl.missing.append(FilelistEntry(path, "<argv>", 0))
         return fl
-    base_dir = cwd if relative_to == "cwd" else os.path.dirname(path)
-    _parse_file_into(fl, path, base_dir, relative_to=relative_to, cwd=cwd)
+    _parse_file_into(fl, path, _base_dir(relative_to, path, cwd), relative_to=relative_to, cwd=cwd)
     return fl
 
 
@@ -418,9 +461,13 @@ def parse_flags(
     *,
     base_dir: Optional[str] = None,
     fl: Optional[Filelist] = None,
-    relative_to: RelativeTo = "cwd",
+    relative_to: RelativeTo = "absolute",
 ) -> Filelist:
-    """Parse command-line style flag strings (each may hold several tokens)."""
+    """Parse command-line style flag strings (each may hold several tokens).
+
+    Paths in the flags are relative to *base_dir* (default: cwd), like on a
+    command line; *relative_to* applies to the files that ``-f`` names.
+    """
     tokens: list[tuple[str, int]] = []
     for flag in flags:
         tokens.extend(tokenize_filelist_text(flag))
@@ -466,11 +513,18 @@ def filelist_to_config(fl: Filelist, base: "VerilogConfig | None" = None) -> "Ve
 # Helpers
 # ----------------------------------------------------------------------
 
-def _resolve(p: str, base_dir: str) -> str:
-    p = os.path.expanduser(p)
-    if not os.path.isabs(p):
-        p = os.path.join(base_dir, p)
-    return os.path.normpath(p)
+def _check_policy(relative_to: str) -> None:
+    if relative_to not in RELATIVE_TO:
+        raise ValueError(f"relative_to must be one of {', '.join(RELATIVE_TO)}, not {relative_to!r}")
+
+
+def _base_dir(relative_to: str, path: str, cwd: str) -> Optional[str]:
+    """Where relative paths inside filelist *path* resolve (None: not allowed)."""
+    if relative_to == "cwd":
+        return cwd
+    if relative_to == "filelist":
+        return os.path.dirname(path)
+    return None
 
 
 def _append_unique_path(lst: list[str], path: str) -> None:

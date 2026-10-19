@@ -141,13 +141,103 @@ def test_nested_f_is_cwd_relative_and_F_is_file_relative(tmp_path, monkeypatch):
     top = tmp_path / "design.f"
     top.write_text("-f sub/cwd.f\n-F sub/rel.f\ntop.v\n")
     monkeypatch.chdir(tmp_path)
-    fl = parse_filelist("design.f")
+    fl = parse_filelist("design.f", relative_to="cwd")
     assert [_norm(p) for p in fl.sources] == [
         _norm(str(tmp_path / "rtl" / "a.v")),
         _norm(str(sub / "leaf.v")),
         _norm(str(tmp_path / "top.v")),
     ]
     assert len(fl.visited) == 3
+
+
+# ----------------------------------------------------------------------
+# Default policy: paths inside a filelist are absolute
+# ----------------------------------------------------------------------
+
+def test_default_policy_takes_absolute_and_var_paths(tmp_path, monkeypatch):
+    _mk_design(tmp_path)
+    monkeypatch.setenv("PROJ", str(tmp_path))
+    f = tmp_path / "design.f"
+    f.write_text(
+        f"+incdir+$PROJ/inc\n"
+        f"-y ${{PROJ}}/rtl\n"
+        f"-v {tmp_path / 'lib' / 'cells.v'}\n"
+        f"$PROJ/top.v\n"
+        f"${{PROJ}}/rtl/*.sv\n"
+    )
+    fl = parse_filelist(str(f))
+    assert fl.problems() == []
+    assert [_norm(p) for p in fl.include_dirs] == [_norm(str(tmp_path / "inc"))]
+    assert [_norm(p) for p in fl.library_dirs] == [_norm(str(tmp_path / "rtl"))]
+    assert [_norm(p) for p in fl.library_files] == [_norm(str(tmp_path / "lib" / "cells.v"))]
+    assert [_norm(p) for p in fl.sources] == [_norm(str(tmp_path / "top.v")), _norm(str(tmp_path / "rtl" / "b.sv"))]
+
+
+def test_default_policy_rejects_relative_paths(tmp_path, monkeypatch):
+    _mk_design(tmp_path)
+    monkeypatch.chdir(tmp_path)     # the files exist relative to cwd and to the filelist: still refused
+    f = tmp_path / "design.f"
+    f.write_text("top.v\n-y rtl\n+incdir+inc\n-v lib/cells.v\n-f other.f\n")
+    (tmp_path / "other.f").write_text("rtl/a.v\n")
+    fl = parse_filelist("design.f")
+    assert fl.sources == [] and fl.library_dirs == [] and fl.include_dirs == [] and fl.library_files == []
+    assert fl.missing == []
+    assert len(fl.errors) == 5
+    assert fl.errors[0] == (f"{f}:1: relative path top.v: filelist paths must be absolute or start with $VAR "
+                            "(use --relative-to filelist or --relative-to cwd)")
+    assert [e.split(": relative path ")[1].split(":")[0] for e in fl.errors] == [
+        "top.v", "rtl", "inc", "lib/cells.v", "other.f"]
+    assert fl.problems()[:5] == fl.errors
+
+
+def test_default_policy_applies_to_nested_f_but_F_is_file_relative(tmp_path):
+    _mk_design(tmp_path)
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "leaf.v").write_text("module leaf; endmodule\n")
+    (sub / "rel.f").write_text("leaf.v\n")                 # -F: relative to rel.f, by definition
+    (sub / "abs.f").write_text("leaf.v\n")                 # -f: same policy as the parent
+    f = tmp_path / "design.f"
+    f.write_text(f"-F {sub / 'rel.f'}\n-f {sub / 'abs.f'}\n")
+    fl = parse_filelist(str(f))
+    assert [_norm(p) for p in fl.sources] == [_norm(str(sub / "leaf.v"))]
+    assert len(fl.errors) == 1 and f"{sub / 'abs.f'}:1: relative path leaf.v" in fl.errors[0]
+
+
+def test_undefined_variable_is_an_error_in_every_policy(tmp_path, monkeypatch):
+    monkeypatch.delenv("NO_SUCH_VAR_RTL", raising=False)
+    f = tmp_path / "design.f"
+    f.write_text("$NO_SUCH_VAR_RTL/a.v\n-y ${NO_SUCH_VAR_RTL}/lib\n")
+    for policy in ("absolute", "cwd", "filelist"):
+        fl = parse_filelist(str(f), relative_to=policy)
+        assert fl.errors == [
+            f"{f}:1: undefined environment variable $NO_SUCH_VAR_RTL in $NO_SUCH_VAR_RTL/a.v",
+            f"{f}:2: undefined environment variable ${{NO_SUCH_VAR_RTL}} in ${{NO_SUCH_VAR_RTL}}/lib",
+        ], policy
+        assert fl.missing == []
+
+
+def test_cli_needs_relative_to_for_relative_paths(tmp_path):
+    import subprocess
+    import sys
+
+    _mk_design(tmp_path)
+    f = tmp_path / "design.f"
+    f.write_text("top.v\n")
+    cmd = [sys.executable, "-m", "pyverilog_auto", "hierarchy", "--no-slang", "-f", str(f)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    assert r.returncode != 0
+    assert "relative path top.v" in r.stderr and "--relative-to filelist" in r.stderr
+    r = subprocess.run(cmd + ["--relative-to", "filelist"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "top : top" in r.stdout
+
+
+def test_unknown_policy_is_rejected(tmp_path):
+    f = tmp_path / "design.f"
+    f.write_text("")
+    with pytest.raises(ValueError, match="relative_to"):
+        parse_filelist(str(f), relative_to="file")  # type: ignore[arg-type]
 
 
 def test_nested_f_with_filelist_policy(tmp_path):

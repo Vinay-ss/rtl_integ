@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, Union
 
 from ..integ.design import Design, DesignError
+from ..integ.filelist import parse_filelist
 from ..prepro import LineMap, PreproError, preprocess_file
 from .project import Binding, Project, SourceEntry, TemplateEntry
 
@@ -389,8 +390,14 @@ class Builder:
     def _build_view_only(self, res: BuildResult) -> BuildResult:
         proj = self.project
         assert proj.filelist
+        fl = parse_filelist(proj.filelist, relative_to=proj.relative_to)  # type: ignore[arg-type]
+        if fl.errors:
+            # relative paths without --relative-to, undefined variables: nothing sensible to show
+            for msg in fl.errors:
+                res.diagnostics.append(BuildDiag("error", msg, source="build"))
+            return res
         try:
-            design = Design.from_filelist(proj.filelist, relative_to="filelist", top=proj.top or None)
+            design = Design.from_filelist_obj(fl, top=proj.top or None)
         except DesignError as exc:
             res.diagnostics.append(BuildDiag("error", str(exc), source="design"))
             return res

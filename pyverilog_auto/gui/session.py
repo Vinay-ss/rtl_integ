@@ -52,7 +52,7 @@ class Session:
     # -- project / build ----------------------------------------------------
 
     def open(self, project: Optional[str] = None, filelist: Optional[str] = None,
-             top: Optional[str] = None) -> dict:
+             top: Optional[str] = None, relative_to: Optional[str] = None) -> dict:
         if project:
             path = project
             if os.path.isdir(path):
@@ -61,7 +61,7 @@ class Session:
             if top:
                 self.project.top = [top]
         elif filelist:
-            self.project = view_only_project(filelist, top=top)
+            self.project = view_only_project(filelist, top=top, relative_to=relative_to)
         else:
             found = _find_manifest(os.getcwd())
             if found is None:

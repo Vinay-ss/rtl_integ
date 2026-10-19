@@ -64,6 +64,8 @@ def test_launch_command_neovide(monkeypatch, tmp_path):
     cmd, env = launch.build_command(ns)
     assert cmd[:4] == ["neovide-bin", "--neovim-bin", "nvim-bin", "--"]
     assert env["RTL_INTEG_OPEN"].split("\n") == ["-f", os.path.abspath("d.f"), "top"]
+    ns.relative_to = "filelist"
+    assert launch.open_args(ns) == ["-f", os.path.abspath("d.f"), "--relative-to=filelist", "top"]
 
 
 def test_launch_falls_back_when_neovide_cannot_start(monkeypatch, capsys):

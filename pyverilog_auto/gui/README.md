@@ -34,7 +34,8 @@ leaf instances must stay connected exactly as before.
 
 ```
 rtl-integ-gui PROJECT_DIR | rtl_integ_project.toml   open a project
-rtl-integ-gui -f design.f [--top TOP]                browse a filelist (view only)
+rtl-integ-gui -f design.f [--top TOP]                browse a filelist (view only; absolute paths,
+                                                     or --relative-to filelist|cwd for relative ones)
 rtl-integ-gui --demo [prepro]                        a copy of the demo (backtick or // py templates)
 rtl-integ-gui --selftest [--demo prepro]             headless check of the installation
 rtl-integ-gui --ui tui|neovide                       force terminal Neovim / Neovide

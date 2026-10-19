@@ -121,7 +121,10 @@ function M.open(args)
   local cwd = vim.fn.getcwd()
   if args[1] == '-f' then
     params.filelist = vim.fn.fnamemodify(args[2] or '', ':p')
-    params.top = args[3]
+    for i = 3, #args do
+      local rel = args[i]:match('^%-%-relative%-to=(%w+)$')
+      if rel then params.relative_to = rel else params.top = args[i] end
+    end
   elseif args[1] and args[1] ~= '' then
     params.project = vim.fn.fnamemodify(args[1], ':p')
   end

@@ -93,6 +93,8 @@ def neovide_problem(path: str) -> Optional[str]:
 def open_args(ns: argparse.Namespace) -> list[str]:
     if ns.filelist:
         out = ["-f", os.path.abspath(ns.filelist)]
+        if getattr(ns, "relative_to", None):
+            out.append(f"--relative-to={ns.relative_to}")
         if ns.top:
             out.append(ns.top)
         return out
@@ -207,6 +209,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="rtl-integ-gui", description=__doc__.split("\n\n")[0])
     ap.add_argument("project", nargs="?", help="project directory or rtl_integ_project.toml")
     ap.add_argument("-f", "--filelist", help="browse an existing filelist (view-only)")
+    ap.add_argument("--relative-to", choices=("cwd", "filelist"), default=None,
+                    help="allow relative paths in the filelist, resolved against cwd or the filelist's "
+                         "directory (default: paths must be absolute, e.g. $PROJ/rtl/a.sv)")
     ap.add_argument("--top", help="top module (view-only mode)")
     ap.add_argument("--ui", choices=("auto", "neovide", "tui"), default="auto")
     ap.add_argument("--nvim", help="path to nvim")

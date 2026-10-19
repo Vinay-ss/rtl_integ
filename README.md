@@ -341,33 +341,45 @@ Without pyslang a text backend handles filelists, hierarchy and ordering
 ### Filelist format
 
 Standard `-f` dialect: one token or more per line, `//` `#` `/* */` comments,
-quoted paths, `\` line continuation, `$VAR` expansion, and:
+quoted paths, `\` line continuation, `$VAR` / `${VAR}` expansion, and:
 
 ```
-+incdir+src/inc          # or -I DIR
-+define+SIM=1+FAST       # or -DNAME[=VAL]
++incdir+$PROJ/src/inc          # or -I DIR
++define+SIM=1+FAST             # or -DNAME[=VAL]
 +libext+.v+.sv
--y ylib                  # library dirs: modules found by <name><ext> are read-only
--v lib/cells.v           # library file: never expanded
---top top                # optional
-src/top.v                # bare paths are source files (globs allowed); they ARE expanded
--f more.f                # nested, relative to cwd (--relative-to cwd, default)
--F sub.f                 # nested, relative to the nested file
+-y $PROJ/ylib                  # library dirs: modules found by <name><ext> are read-only
+-v $PROJ/lib/cells.v           # library file: never expanded
+--top top                      # optional
+$PROJ/src/top.v                # bare paths are source files (globs allowed); they ARE expanded
+-f $PROJ/more.f                # nested, same rule for its paths
+-F $PROJ/sub/sub.f             # nested, its paths are relative to sub.f
 ```
 
-`--relative-to filelist` resolves the bare paths of a `-f` file against
-the filelist's own directory (handy for checked-in filelists).
+Paths inside a filelist must be absolute: `/proj/rtl/a.sv`, `$PROJ/rtl/a.sv`,
+`${PROJ}/rtl/a.sv` or `~/rtl/a.sv`.  A relative path is an error unless the
+command says what it is relative to:
+
+* `--relative-to filelist`: the filelist's own directory (checked-in filelists);
+* `--relative-to cwd`: the directory the command runs in (like most simulators).
+
+An undefined variable is always an error.  `-F` is the one exception: the
+paths inside the file it names are relative to that file.  Paths on the
+command line itself (`-f design.f`, `-y DIR`, `FILE`) are relative to the
+current directory as usual.
 
 ### Commands
 
 ```bash
 # instance tree, dependency levels (level 0 = leaves), leaf-first order
-pyverilog-auto hierarchy -f design.f --relative-to filelist --view all
+pyverilog-auto hierarchy -f design.f --view all
 pyverilog-auto hierarchy -f design.f --json > design.json
 
 # expand every source file, leaves first (library files are never touched)
-pyverilog-auto integrate -f design.f --relative-to filelist --diff      # preview
-pyverilog-auto integrate -f design.f --relative-to filelist             # write
+pyverilog-auto integrate -f design.f --diff      # preview
+pyverilog-auto integrate -f design.f             # write
+
+# a filelist with relative paths (here: relative to the filelist)
+pyverilog-auto integrate -f design.f --relative-to filelist
 ```
 
 `integrate` options: `--dry-run`/`--no-save`, `--diff`, `--only REGEX`
@@ -381,7 +393,7 @@ modules), `--strict` (fail on filelist/parse errors), `--lib REGEX` /
 ```python
 from pyverilog_auto.integ import Design
 
-design = Design.from_filelist("design.f", relative_to="filelist")   # or Design.from_files([...], library_dirs=[...])
+design = Design.from_filelist("design.f")   # relative_to="filelist"|"cwd" for relative paths; or Design.from_files([...])
 design.order().levels            # [[leaf files], [wrappers], [top]]
 for root in design.hierarchy():  # Instance tree; paths like "top.gen_cores[1].u_core.u_dma"
     ...
@@ -399,7 +411,7 @@ are regexes over hierarchical instance paths; `\1`-style backreferences pair
 the matches. Requires pyslang.
 
 ```bash
-pyverilog-auto route -f design.f --relative-to filelist \
+pyverilog-auto route -f design.f \
     --route 'top\.u_cluster(\d+)\.u_core\.u_dma:m_axi' 'top\.u_mem\.u_ctrl\1:s_axi' \
     --dry-run                       # print the planned diff, write nothing
 pyverilog-auto route -f design.f --routes routes.toml --then-expand   # write, then expand leaf-first
@@ -537,13 +549,17 @@ so routing an interface to an AUTOARG-style module is rejected before
 anything is written. AUTO-style parents already export unconsumed sub-instance
 outputs through AUTOOUTPUT, so `to :: top` mostly matters for hand-written
 intermediates, renamed ports and interfaces. The tool collects the annotations in a first
-pass, resolves them to exact paths, and writes a reviewable `routes.toml`:
+pass and resolves them to exact paths; no routes file is needed:
 
 ```bash
-pyverilog-auto route -f design.f --relative-to filelist --collect-only --routes-out routes.toml
-pyverilog-auto route -f design.f --relative-to filelist --routes routes.toml --then-expand
-# or in one go:
-pyverilog-auto route -f design.f --relative-to filelist --collect --routes-out routes.toml --then-expand
+pyverilog-auto route -f design.f --collect --then-expand
+```
+
+To review them first, write them to a `routes.toml` and apply that file:
+
+```bash
+pyverilog-auto route -f design.f --collect-only --routes-out routes.toml
+pyverilog-auto route -f design.f --routes routes.toml --then-expand
 ```
 
 Python: `design.collect_auto_routes()` returns the resolved specs (plus

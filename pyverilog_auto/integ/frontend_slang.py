@@ -31,6 +31,10 @@ _INTEGER_TYPE_KINDS = {
 }
 
 
+def _range_text(r) -> str:
+    return f"[{r.left}:{r.right}]" if hasattr(r, "left") else str(r)
+
+
 def _probe() -> None:
     """Import-time check of the handful of pyslang attributes we rely on."""
     import pyslang
@@ -685,18 +689,81 @@ class SlangFrontend:
             width = int(t.bitWidth)
         except Exception:
             pass
-        param_dependent = False
-        if pinfo and inst.module is not None and (sym_packed or unpacked):
+        type_name, type_dims_numeric, type_unpacked_numeric, local_type = None, "", None, False
+        if not is_struct:
+            try:
+                type_name, type_dims_numeric, type_unpacked_numeric, local_type = self._decl_type(t)
+            except Exception:
+                pass
+        # the dims of pkg::e_t [N-1:0] are part of its type text, which PortInfo
+        # lacks for a non-ANSI port (or one the typedef regexp does not match)
+        type_dims = ""
+        if type_name is not None:
+            try:
+                tsyn = p.internalSymbol.declaredType.typeSyntax
+                tt = ts.strip_ws(str(tsyn)) if tsyn is not None else ""
+                type_dims = tt[tt.find("["):] if "[" in tt else ""
+            except Exception:
+                pass
+        param_dependent = local_type
+        if pinfo and inst.module is not None and (sym_packed or unpacked or type_dims):
             params = set(inst.module.params)
-            idents = set(re.findall(r"[A-Za-z_]\w*", sym_packed + unpacked))
-            param_dependent = bool(idents & params)
+            idents = set(re.findall(r"[A-Za-z_]\w*", sym_packed + unpacked + type_dims))
+            param_dependent = param_dependent or bool(idents & params)
         return ElaboratedPort(
             name=port, kind="struct" if is_struct else "signal", direction=direction,
             type_text_numeric=str(t), packed_dims_numeric=packed_numeric, unpacked_dims=unpacked,
             bit_width=width, is_struct=is_struct, struct_qualified_name=qualified, struct_is_local=local,
             param_dependent=param_dependent, symbolic_packed_dims=sym_packed, symbolic_type_text=sym_type,
             unpacked_dims_numeric=unpacked if unpacked_numeric is None else unpacked_numeric,
+            type_name=type_name, type_dims=type_dims, type_dims_numeric=type_dims_numeric, local_type=local_type,
+            type_unpacked_numeric=unpacked if type_unpacked_numeric is None else type_unpacked_numeric,
+            is_signed=bool(getattr(canon, "isSigned", False)),
         )
+
+    @staticmethod
+    def _decl_type(t) -> tuple[Optional[str], str, Optional[str], bool]:
+        """How a declaration in another module names the type *t*:
+        ``(type_name, dims, unpacked, local)``.
+
+        *type_name* replaces ``logic`` for a predefined integer or real type
+        ("int unsigned") and for a typedef visible from any module, by its
+        qualified name ("pkg::e_t", also for an imported ``e_t``); *dims* and
+        *unpacked* are the elaborated packed and unpacked dims around it
+        ("[2:0]" for ``pkg::e_t [N-1:0]`` with N=3; "[0:3]" for
+        ``pkg::v_t x [4]``, None when one is not fixed-size).  It is None for
+        a logic/bit/reg vector.  Type parameters and typedefs of the module
+        or of $unit are not visible elsewhere; they are looked through to
+        their elaborated type (*local* is then True): T = int is "int",
+        T = logic [9:0] a vector."""
+        from pyslang.ast import SymbolKind
+
+        cur = t
+        unpacked: Optional[list[str]] = []
+        while not cur.isAlias and cur.isUnpackedArray:
+            if unpacked is not None:
+                unpacked = unpacked + [_range_text(cur.fixedRange)] if cur.hasFixedRange else None
+            cur = cur.elementType
+        unpacked_text = None if unpacked is None else "".join(unpacked)
+        dims: list[str] = []
+        local = False
+        while True:
+            if cur.isAlias:
+                ps = cur.parentScope
+                path = cur.hierarchicalPath
+                # a $unit typedef ("e_t", no package) is not visible from other files either
+                if (ps is not None and ps.containingInstance is not None) or "::" not in path:
+                    local = True
+                    cur = cur.targetType.type
+                    continue
+                return path, "".join(dims), unpacked_text, local
+            if not cur.isPackedArray:
+                break
+            dims.append(_range_text(cur.fixedRange))
+            cur = cur.elementType
+        if cur.kind in (SymbolKind.PredefinedIntegerType, SymbolKind.FloatingType):
+            return str(cur), "".join(dims), unpacked_text, local
+        return None, "", None, local
 
     @staticmethod
     def _elab_dims(t) -> tuple[str, Optional[str]]:
@@ -710,22 +777,19 @@ class SlangFrontend:
         array gives its range ("[0:0]" for a scalar, "[31:0]" for int).  The
         unpacked part is None when a dimension is not fixed-size (dynamic,
         queue, associative)."""
-        def rng(r) -> str:
-            return f"[{r.left}:{r.right}]" if hasattr(r, "left") else str(r)
-
         cur = t.canonicalType
         unpacked: list[str] = []
         fixed = True
         while cur.isUnpackedArray:
             if cur.hasFixedRange:
-                unpacked.append(rng(cur.fixedRange))
+                unpacked.append(_range_text(cur.fixedRange))
             else:
                 fixed = False
             cur = cur.elementType.canonicalType
         packed: list[str] = []
         while cur.isPackedArray:
-            packed.append(rng(cur.fixedRange))
+            packed.append(_range_text(cur.fixedRange))
             cur = cur.elementType.canonicalType
         if cur.hasFixedRange and (not packed or cur.bitWidth > 1):
-            packed.append(rng(cur.fixedRange))
+            packed.append(_range_text(cur.fixedRange))
         return "".join(packed), ("".join(unpacked) if fixed else None)

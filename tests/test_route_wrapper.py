@@ -359,3 +359,194 @@ def test_param_2d_route_writes_every_dim_and_is_idempotent(tmp_path):
     r = _route(root, "--collect", "--then-expand")
     assert r.returncode == 2 and "E_TYPE_MISMATCH" in r.stdout + r.stderr, r.stdout + r.stderr
     assert (root / "rtl" / "top.sv").read_bytes() == reshaped
+
+
+_TYPED_LEAF = """\
+package pkg;
+  typedef enum logic [1:0] {A, B, C} e_t;
+  typedef enum logic [1:0] {X, Y, Z} f_t;
+  typedef logic [3:0][7:0] v_t;
+endpackage
+
+module leaf import pkg::*; #(parameter N = 4, parameter type T = logic)
+  (input  logic            clk,
+   output int              i,
+   output pkg::e_t         e,
+   output pkg::v_t         v,
+   output pkg::e_t [N-1:0] ea,
+   output e_t              ie,
+   output T                tp);
+endmodule
+"""
+
+_TYPED_SRC = """\
+module src
+  (input  logic    clk,
+   output pkg::e_t e,
+   output pkg::v_t v,
+   output int      i);
+endmodule
+"""
+
+_TYPED_SINK = """\
+module sink import pkg::*;
+  (input logic    clk,
+   input e_t      e_in,
+   input pkg::v_t v,
+   input int      i);
+endmodule
+"""
+
+_TYPED_TOP = """\
+module top
+  (/*AUTOINPUT*/
+   /*AUTOOUTPUT*/
+   );
+
+   //auto_route u_leaf0:i :: to :: $top:dbg_i
+   //auto_route u_leaf0:e :: to :: $top:dbg_e
+   //auto_route u_leaf0:v :: to :: $top:dbg_v
+   //auto_route u_leaf0:ea :: to :: $top:dbg_ea
+   //auto_route u_leaf0:ie :: to :: $top:dbg_ie
+   //auto_route u_leaf0:tp :: to :: $top:dbg_tp
+   //auto_route u_src0:e :: to :: u_sink0:e_in
+   //auto_route u_src0:v :: to :: u_sink0:v
+   //auto_route u_src0:i :: to :: u_sink0:i
+   /*AUTOWIRE*/
+
+   leaf #(.N(3), .T(logic [9:0])) u_leaf0 (/*AUTOINST*/);
+   src u_src0 (/*AUTOINST*/);
+   sink u_sink0 (/*AUTOINST*/);
+endmodule
+"""
+
+
+def _write_design(root: Path, files: dict[str, str]) -> None:
+    (root / "rtl").mkdir(parents=True)
+    for name, text in files.items():
+        (root / "rtl" / name).write_bytes(text.encode())
+    (root / "design.f").write_bytes(("+libext+.sv+.v\n" + "".join(f"rtl/{n}\n" for n in files) + "--top top\n").encode())
+
+
+def _slang_errors(root: Path, names) -> str:
+    import pyslang
+    from pyslang.ast import Compilation
+    from pyslang.syntax import SyntaxTree
+
+    comp = Compilation()
+    for n in names:
+        comp.addSyntaxTree(SyntaxTree.fromFile(str(root / "rtl" / n)))
+    errs = [d for d in comp.getAllDiagnostics() if d.isError()]
+    return pyslang.DiagnosticEngine.reportAll(comp.sourceManager, errs) if errs else ""
+
+
+# a port of a named type (int, an enum, a vector typedef) is routed with that
+# type, not as a 1-bit logic: package typedefs by their qualified name (an
+# imported e_t too), a parameter-dependent pkg::e_t [N-1:0] and a type
+# parameter with their elaborated dims; existing ports of that type are taken
+# as routed, a 1-bit port of the same name is refused
+def test_typed_route_writes_the_type_and_is_idempotent(tmp_path):
+    root = tmp_path / "typed"
+    files = {"leaf.sv": _TYPED_LEAF, "src.sv": _TYPED_SRC, "sink.sv": _TYPED_SINK, "top.sv": _TYPED_TOP}
+    _write_design(root, files)
+    r = _route(root, "--collect", "--then-expand")
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "W_RESIDUAL" not in out and "E_TYPE_MISMATCH" not in out and "residual edits: 0" in out
+    assert "elaborated width [2:0]" in out and "elaborated type logic [9:0]" in out
+    top = (root / "rtl" / "top.sv").read_bytes()
+    text = top.decode()
+    for decl, src in (("int dbg_i", "i"), ("pkg::e_t dbg_e", "e"), ("pkg::v_t dbg_v", "v"),
+                      (r"pkg::e_t \[2:0\] dbg_ea", "ea"), ("pkg::e_t dbg_ie", "ie"), (r"logic \[9:0\] dbg_tp", "tp")):
+        assert re.search(rf"output {decl},\s*// routed: u_leaf0\.{src}->top\.", text), (decl, text)
+    # an enum net into an enum input, and a typedef the AUTOs (no typedef regexp) would not declare
+    assert re.search(r"^\s*pkg::e_t e_in;", text, re.M), text
+    assert re.search(r"^\s*pkg::v_t v;", text, re.M), text
+    assert re.search(r"^\s*int\s+i;", text, re.M), text
+    assert _inst_pins(text, "u_src0")["e"] == "e_in" and _inst_pins(text, "u_sink0")["v"] == "v"
+    assert _slang_errors(root, files) == ""
+    for _ in range(2):
+        r = _route(root, "--collect", "--then-expand")
+        out = r.stdout + r.stderr
+        assert r.returncode == 0 and "E_TYPE_MISMATCH" not in out, out
+        assert "0 edit(s)" in out and "0 changed, 0 written" in out
+        assert (root / "rtl" / "top.sv").read_bytes() == top
+    # the 1-bit port an earlier version wrote is refused, nothing written
+    one_bit = top.replace(b"output int dbg_i", b"output logic dbg_i")
+    (root / "rtl" / "top.sv").write_bytes(one_bit)
+    r = _route(root, "--collect", "--then-expand")
+    assert r.returncode == 2 and "E_TYPE_MISMATCH" in r.stdout + r.stderr, r.stdout + r.stderr
+    assert (root / "rtl" / "top.sv").read_bytes() == one_bit
+    # ... and so is another enum of the same width (it would need a cast)
+    (root / "rtl" / "top.sv").write_bytes(top)
+    sink = (root / "rtl" / "sink.sv").read_bytes()
+    (root / "rtl" / "sink.sv").write_bytes(sink.replace(b"input e_t      e_in", b"input f_t      e_in"))
+    r = _route(root, "--collect", "--then-expand")
+    assert r.returncode == 2 and "E_TYPE_MISMATCH" in r.stdout + r.stderr, r.stdout + r.stderr
+    assert (root / "rtl" / "top.sv").read_bytes() == top
+
+
+_TYPED_NONANSI_LEAF = """\
+package pkg;
+  typedef enum logic [1:0] {A, B, C} e_t;
+endpackage
+
+module leaf (clk, e, ea);
+   parameter N = 4;
+   input  logic            clk;
+   output pkg::e_t         e;
+   output pkg::e_t [N-1:0] ea;
+endmodule
+"""
+
+_TYPED_NONANSI_MID = """\
+module mid (/*AUTOARG*/
+   // Inputs
+   clk
+   );
+   input logic clk;
+   leaf #(.N(3)) u_leaf (.clk(clk));
+endmodule
+"""
+
+_TYPED_NONANSI_TOP = """\
+module top (input logic clk);
+   //auto_route u_mid.u_leaf:e :: to :: $top:dbg_e
+   //auto_route u_mid.u_leaf:ea :: to :: $top:dbg_ea
+   mid u_mid (.clk(clk));
+endmodule
+"""
+
+_TYPEDEF_REGEXP_LV = """
+// Local Variables:
+// verilog-typedef-regexp: "_t$"
+// End:
+"""
+
+
+# the dims of a non-ANSI pkg::e_t [N-1:0] port are kept (they are part of its
+# type text); a module with AUTOARG needs a typedef regexp that matches the
+# routed typedef, as for structs, or AUTOARG would list pkg::e_t as a port
+def test_typed_nonansi_route_keeps_dims_and_needs_typedef_regexp(tmp_path):
+    root = tmp_path / "typed_nonansi"
+    files = {"leaf.sv": _TYPED_NONANSI_LEAF, "mid.sv": _TYPED_NONANSI_MID, "top.sv": _TYPED_NONANSI_TOP}
+    _write_design(root, files)
+    r = _route(root, "--collect", "--then-expand")
+    assert r.returncode == 2 and "E_TYPEDEF_REGEXP" in r.stdout + r.stderr, r.stdout + r.stderr
+    assert (root / "rtl" / "mid.sv").read_text() == _TYPED_NONANSI_MID
+    (root / "rtl" / "mid.sv").write_bytes((_TYPED_NONANSI_MID + _TYPEDEF_REGEXP_LV).encode())
+    r = _route(root, "--collect", "--then-expand")
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "W_RESIDUAL" not in out and "residual edits: 0" in out and "elaborated width [2:0]" in out
+    mid = (root / "rtl" / "mid.sv").read_bytes()
+    text = mid.decode()
+    assert re.search(r"^\s*output pkg::e_t dbg_e;", text, re.M), text
+    assert re.search(r"^\s*output pkg::e_t \[2:0\] dbg_ea;", text, re.M), text
+    assert re.search(r"/\*AUTOARG\*/\s*// Outputs\s*dbg_e, dbg_ea,\s*// Inputs\s*clk", text), text
+    assert re.search(r"output pkg::e_t \[2:0\] dbg_ea\b", (root / "rtl" / "top.sv").read_text())
+    assert _slang_errors(root, files) == ""
+    r = _route(root, "--collect", "--then-expand")
+    out = r.stdout + r.stderr
+    assert r.returncode == 0 and "0 edit(s)" in out and "0 changed, 0 written" in out, out
+    assert (root / "rtl" / "mid.sv").read_bytes() == mid

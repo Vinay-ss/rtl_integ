@@ -35,6 +35,9 @@ if TYPE_CHECKING:
 
 _PORT_LIST_MARKERS = ("AUTOINPUT", "AUTOOUTPUT", "AUTOINOUT", "AUTOINOUTMODULE", "AUTOINOUTCOMP",
                       "AUTOINOUTIN", "AUTOINOUTPARAM", "AUTOINOUTMODPORT")
+# keyword types whose width is not given by packed dims
+_SIZED_TYPES = {"byte", "shortint", "int", "longint", "integer", "time", "shortreal", "real", "realtime",
+                "string", "event", "chandle"}
 
 
 # ----------------------------------------------------------------------
@@ -348,24 +351,32 @@ class RoutePlanner:
         # A plain signal cannot land on a user-typed (struct/typedef) port.
         from ..parser.decl_parser import _TYPE_KEYWORDS
 
-        if any(tok not in _TYPE_KEYWORDS for tok in (p.type_text or "").split()):
+        words = (p.type_text or "").split()
+        named_dst = any(tok not in _TYPE_KEYWORDS for tok in words)
+        if named_dst and not ep.type_name:
             return False
-        a = self._norm_dims(ep.symbolic_packed_dims)
-        b = self._norm_dims(p.packed_dims)
-        if a == b and self._norm_dims(ep.unpacked_dims) == self._norm_dims(p.unpacked_dims):
-            return True
-        # symbolic texts differ: compare evaluated width when possible
-        if ep.bit_width is not None and not b and ep.bit_width == 1 and not p.unpacked_dims:
-            return True
+        # the source texts only compare between two vectors (int and logic
+        # have the same empty dims)
+        if ep.type_name is None and not ep.local_type and not named_dst and not set(words) & _SIZED_TYPES:
+            a = self._norm_dims(ep.symbolic_packed_dims)
+            b = self._norm_dims(p.packed_dims)
+            if a == b and self._norm_dims(ep.unpacked_dims) == self._norm_dims(p.unpacked_dims):
+                return True
+            # symbolic texts differ: compare evaluated width when possible
+            if ep.bit_width is not None and not b and ep.bit_width == 1 and not p.unpacked_dims:
+                return True
         # ... else the elaborated types, e.g. src [W-1:0] against the [7:0] an
-        # earlier run wrote for a parameter-dependent width (re-runs are no-ops);
-        # an unpacked array has bit width 0 and is compared by its dims
+        # earlier run wrote for a parameter-dependent width, or int against
+        # int (re-runs are no-ops); an unpacked array has bit width 0 and is
+        # compared by its dims
         if inst is None or port is None or ep.bit_width is None:
             return False
         try:
             dst_ep = self.design.port_at(inst, port)
         except LookupError:
             return False
+        if named_dst and dst_ep.type_name != ep.type_name:
+            return False     # another typedef of the same width (an enum needs a cast)
         return (dst_ep.kind == "signal" and dst_ep.bit_width == ep.bit_width
                 and self._norm_dims(dst_ep.packed_dims_numeric) == self._norm_dims(ep.packed_dims_numeric)
                 and self._norm_dims(dst_ep.unpacked_dims_numeric) == self._norm_dims(ep.unpacked_dims_numeric))
@@ -410,9 +421,14 @@ class RoutePlanner:
                 self._err("E_LOCAL_TYPEDEF", f"{net.identity}: struct type {net.src_ep.struct_qualified_name} is a module-local typedef; move it to a package", route=label)
             if net.src_ep.param_dependent:
                 ep = net.src_ep
-                sym = " ".join(d for d in (ep.symbolic_packed_dims, ep.unpacked_dims) if d)
                 num = " ".join(d for d in self._decl_dims(ep) if d)
-                self._warn("W_PARAM_WIDTH", f"{net.identity}: width {sym} depends on a parameter; ports are written explicitly with the elaborated width {num}", route=label)
+                if ep.local_type:
+                    t = " ".join(x for x in (ep.type_name or ("logic signed" if ep.is_signed else "logic"), num) if x)
+                    self._warn("W_PARAM_WIDTH", f"{net.identity}: type {ep.symbolic_type_text or ep.type_text_numeric} is not visible outside {net.pairs[0].src_inst.module_name}; "
+                               f"ports are written explicitly with the elaborated type {t}", route=label)
+                else:
+                    sym = " ".join(d for d in (ep.type_dims if ep.type_name else ep.symbolic_packed_dims, ep.unpacked_dims) if d)
+                    self._warn("W_PARAM_WIDTH", f"{net.identity}: width {sym} depends on a parameter; ports are written explicitly with the elaborated width {num}", route=label)
         return list(nets.values())
 
     # ------------------------------------------------------------------
@@ -692,13 +708,29 @@ class RoutePlanner:
             col = self._inst_columns[file_key] = self.design.effective_config(file_key).auto_inst_column
         return col
 
-    def _struct_ok(self, mod: ModuleDef, net: RouteNet) -> bool:
-        if net.kind != "struct":
+    @staticmethod
+    def _typedef_name(net: RouteNet) -> Optional[str]:
+        """The typedef a routed port or net is declared with: a struct, or a
+        typedef'd signal such as pkg::e_t (None for logic, int, ...)."""
+        from ..parser.decl_parser import _TYPE_KEYWORDS
+
+        ep = net.src_ep
+        if net.kind == "struct":
+            return ep.struct_qualified_name or ""
+        if ep.type_name and ep.type_name.split()[0] not in _TYPE_KEYWORDS:
+            return ep.type_name
+        return None
+
+    def _typedef_ok(self, mod: ModuleDef, net: RouteNet) -> bool:
+        """The AUTOs of *mod* read the routed typedef as a type: its typedef
+        regexp matches (else AUTOARG lists the type name as a port, and
+        AUTOINST takes the port for an interface that AUTOWIRE skips)."""
+        qn = self._typedef_name(net)
+        if qn is None:
             return True
         cfg = self.design.effective_config(mod.file)
         if not cfg.typedef_regexp:
             return False
-        qn = net.src_ep.struct_qualified_name or ""
         try:
             return bool(re.search(cfg.typedef_regexp, qn)) or bool(re.search(cfg.typedef_regexp, qn.split("::")[-1]))
         except re.error:
@@ -715,7 +747,7 @@ class RoutePlanner:
                 pin_auto = False
             if net.src_ep.param_dependent:
                 pin_auto = False
-            if net.kind == "struct" and parent_mod is not None and not self._struct_ok(parent_mod, net):
+            if parent_mod is not None and not self._typedef_ok(parent_mod, net):
                 pin_auto = False
             s.pin_auto = pin_auto
             if s.parent_is_host or parent_mod is None:
@@ -763,18 +795,19 @@ class RoutePlanner:
             t = ep.struct_qualified_name or ep.symbolic_type_text or "logic"
             return f"{direction} {t} {name}" if ansi else f"{direction} {t} {name};"
         parts = [direction or "input"]
-        if self._uses_logic(mod):
-            parts.append("logic")
-        sym = ep.symbolic_type_text or ""
-        if "signed" in sym.split() or "signed" in (ep.type_text_numeric or ""):
-            pass
         dims, unpacked = self._decl_dims(ep)
-        src_pinfo = None
-        for pp in net.pairs:
-            if pp.src_inst.module is not None:
-                src_pinfo = pp.src_inst.module.port(net.identity.port if side == "src" else pp.pair.src.port) or src_pinfo
-        if src_pinfo is not None and src_pinfo.signed:
-            parts.append(src_pinfo.signed)
+        if ep.type_name:
+            parts.append(ep.type_name)
+        else:
+            if self._uses_logic(mod):
+                parts.append("logic")
+            src_pinfo = None
+            for pp in net.pairs:
+                if pp.src_inst.module is not None:
+                    src_pinfo = pp.src_inst.module.port(net.identity.port if side == "src" else pp.pair.src.port) or src_pinfo
+            signing = self._signing(ep, src_pinfo)
+            if signing:
+                parts.append(signing)
         if dims:
             parts.append(dims)
         parts.append(name)
@@ -784,26 +817,42 @@ class RoutePlanner:
         return text if ansi else text + ";"
 
     @staticmethod
+    def _signing(ep: ElaboratedPort, src_pinfo: Optional[PortInfo]) -> Optional[str]:
+        if ep.local_type:
+            return "signed" if ep.is_signed else None
+        return src_pinfo.signed if src_pinfo is not None else None
+
+    @staticmethod
     def _decl_dims(ep: ElaboratedPort) -> tuple[str, str]:
         """Packed and unpacked dims written for a routed signal: the source
-        port's text, or its elaborated dims when that text mentions a
-        parameter (not visible where the port or net is written)."""
+        port's text, or its elaborated dims when that text is not visible
+        where the port or net is written (param_dependent).  With a
+        type_name, they are the dims around that type."""
         if not ep.param_dependent:
-            return ep.symbolic_packed_dims, ep.unpacked_dims
-        return (ep.packed_dims_numeric if ep.symbolic_packed_dims else ""), ep.unpacked_dims_numeric
+            return (ep.type_dims if ep.type_name else ep.symbolic_packed_dims), ep.unpacked_dims
+        if ep.type_name:
+            return ep.type_dims_numeric, ep.type_unpacked_numeric
+        if ep.local_type:
+            packed = "" if ep.packed_dims_numeric == "[0:0]" else ep.packed_dims_numeric   # T = logic stays scalar
+        else:
+            packed = ep.packed_dims_numeric if ep.symbolic_packed_dims else ""
+        return packed, ep.unpacked_dims_numeric
 
     def _net_decl_text(self, net: RouteNet, mod: ModuleDef, name: str) -> str:
         ep = net.src_ep
         if net.kind == "struct":
             return f"{ep.struct_qualified_name or ep.symbolic_type_text} {name};"
-        kw = "logic" if self._uses_logic(mod) else "wire"
-        parts = [kw]
-        src_pinfo = None
-        for pp in net.pairs:
-            if pp.src_inst.module is not None:
-                src_pinfo = pp.src_inst.module.port(pp.pair.src.port) or src_pinfo
-        if src_pinfo is not None and src_pinfo.signed:
-            parts.append(src_pinfo.signed)
+        if ep.type_name:
+            parts = [ep.type_name]
+        else:
+            parts = ["logic" if self._uses_logic(mod) else "wire"]
+            src_pinfo = None
+            for pp in net.pairs:
+                if pp.src_inst.module is not None:
+                    src_pinfo = pp.src_inst.module.port(pp.pair.src.port) or src_pinfo
+            signing = self._signing(ep, src_pinfo)
+            if signing:
+                parts.append(signing)
         dims, unpacked = self._decl_dims(ep)
         if dims:
             parts.append(dims)
@@ -907,7 +956,7 @@ class RoutePlanner:
             key = ("net", hm.name, name)
             if key in self._edit_keys or name in self._created_nets.get(hm.name, set()):
                 continue
-            if net.kind != "iface" and all(s.pin_auto for s in host_steps) and hm.has_marker("AUTOWIRE", "AUTOLOGIC") and self._struct_ok(hm, net):
+            if net.kind != "iface" and all(s.pin_auto for s in host_steps) and hm.has_marker("AUTOWIRE", "AUTOLOGIC") and self._typedef_ok(hm, net):
                 self._note_auto(res, AutoNativeItem(hm.name, name, "net", "AUTOWIRE"))
                 self._created_nets.setdefault(hm.name, set()).add(name)
                 continue
@@ -1021,8 +1070,8 @@ class RoutePlanner:
         if sym is not None and not sym.in_auto_fence and sym.kind != "port":
             self._err("E_NAME_COLLISION", f"{mod.name}: {name} already exists as a {sym.kind}", route=label, rng=sym.range)
             return
-        if net.kind == "struct" and mod.has_marker("AUTOARG") and not self._struct_ok(mod, net):
-            self._err("E_TYPEDEF_REGEXP", f"{mod.name} uses AUTOARG but its typedef regexp does not match {net.src_ep.struct_qualified_name}; add '// verilog-typedef-regexp: \"_t$\"' to its Local Variables", route=label, inst=inst)
+        if mod.has_marker("AUTOARG") and not self._typedef_ok(mod, net):
+            self._err("E_TYPEDEF_REGEXP", f"{mod.name} uses AUTOARG but its typedef regexp does not match {self._typedef_name(net)}; add '// verilog-typedef-regexp: \"_t$\"' to its Local Variables", route=label, inst=inst)
             return
         sf = design.files[mod.file]
         comment = self._comment(net)

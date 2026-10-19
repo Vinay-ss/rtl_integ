@@ -439,6 +439,13 @@ How it works:
   an ANSI port entry (or a non-ANSI `input ... name;` declaration) and an
   explicit `.port (net)` pin. Interface ports are always written explicitly
   (AUTOINPUT never creates them); AUTOINST still emits `.p (p.modport)`.
+* **Typed ports keep their type.** `int`, `int unsigned` or a package typedef
+  such as `pkg::e_t` is written by name (an imported `e_t` as `pkg::e_t`), so
+  an enum net can still drive an enum input. Dims that depend on a parameter,
+  a type parameter and a typedef outside a package are written with their
+  elaborated type instead (`W_PARAM_WIDTH`). As for structs, the AUTOs carry a
+  typedef only where `verilog-typedef-regexp` matches it; elsewhere the route
+  writes explicit ports, pins and nets (`E_TYPEDEF_REGEXP` in an AUTOARG module).
 * Renames are explicit pins placed before `/*AUTOINST*/` (never AUTO_TEMPLATE,
   which is module-scoped). Modules shared by several routed instances keep
   one port name; the renames happen at the parent that hosts the instances.

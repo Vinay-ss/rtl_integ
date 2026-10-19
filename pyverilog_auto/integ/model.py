@@ -255,10 +255,16 @@ class ElaboratedPort:
     struct_is_local: bool = False
     iface_type: Optional[str] = None
     modport: Optional[str] = None
-    param_dependent: bool = False            # symbolic packed or unpacked dims mention a parameter of the module
+    param_dependent: bool = False            # the type text is not valid outside the module: its dims mention a parameter, or local_type
     symbolic_packed_dims: str = ""           # from the source text (PortInfo)
     symbolic_type_text: Optional[str] = None
     unpacked_dims_numeric: str = ""          # unpacked dims of the elaborated type, "[0:3]" for [N] (or "")
+    type_name: Optional[str] = None          # type other modules declare it with instead of logic: "int unsigned", "pkg::e_t" (None: a vector)
+    type_dims: str = ""                      # packed dims added on top of type_name, as written: "[N-1:0]" for pkg::e_t [N-1:0]
+    type_dims_numeric: str = ""              # ... and elaborated: "[2:0]"
+    type_unpacked_numeric: str = ""          # elaborated unpacked dims around type_name (not those of the typedef itself)
+    local_type: bool = False                 # the type is (or uses) a type parameter, or a typedef of the module or $unit
+    is_signed: bool = False                  # the elaborated type is signed
 
 
 @dataclass

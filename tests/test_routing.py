@@ -153,13 +153,19 @@ def test_name_collision_with_existing_signal(tmp_path):
 def test_param_dependent_width_is_explicit_with_warning(tmp_path):
     root = _copy(tmp_path)
     d = _design(root)
-    report = d.apply_routes([RouteSpec(src=r"top\.u_cluster0\.u_core\.u_dma:data", dst=r"top\.u_mem\.u_ctrl0:data_in")])
+    spec = RouteSpec(src=r"top\.u_cluster0\.u_core\.u_dma:data", dst=r"top\.u_mem\.u_ctrl0:data_in")
+    report = d.apply_routes([spec])
     assert any(w.code == "W_PARAM_WIDTH" for w in report.warnings)
     ctrl = (root / "rtl" / "ctrl.sv").read_text()
     assert "input logic [31:0] data_in" in ctrl
     core = (root / "rtl" / "core.sv").read_text()
     assert "output logic [31:0] data" in core       # explicit at every level, numeric width
     assert ".data                     (data)" in core
+    # re-run: the written [31:0] dst port matches the src's elaborated width (not its text)
+    before = {n: (root / "rtl" / n).read_bytes() for n in RTL_FILES}
+    report = _design(root).apply_routes([spec])
+    assert not report.errors and report.edits == [] and report.files_changed == []
+    assert {n: (root / "rtl" / n).read_bytes() for n in RTL_FILES} == before
 
 
 # ----------------------------------------------------------------------

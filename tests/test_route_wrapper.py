@@ -229,3 +229,62 @@ def test_routed_pins_before_autoinst_of_auto_only_child(tmp_path, pre_expanded):
     assert m and "/*AUTOINST*/" in m.group(1) and ".clk" in m.group(1)
     before_marker = m.group(1).split("/*AUTOINST*/")[0]
     assert re.search(r"\.y\s+\(a_y\),", before_marker), before_marker
+
+
+_PARAM_LEAF = """\
+module leaf #(parameter W = 8)
+  (input  logic         clk,
+   input  logic         rst_n,
+   input  logic [W-1:0] d,
+   output logic [W-1:0] q);
+   always_ff @(posedge clk or negedge rst_n)
+     if (!rst_n) q <= '0;
+     else        q <= d;
+endmodule
+"""
+
+_PARAM_TOP = r"""module top #(parameter W = 8)
+  (/*AUTOINPUT*/
+   /*AUTOOUTPUT*/
+   );
+
+   //auto_route u_leaf0:q :: to :: $top:dbg_q
+   /*AUTOWIRE*/
+
+   /* leaf AUTO_TEMPLATE "u_leaf\([0-9]+\)" (
+      .d (d@[]),
+      .q (q@[]),
+    ); */
+   leaf #(.W(W)) u_leaf0 (/*AUTOINST*/);
+   leaf #(.W(W)) u_leaf1 (/*AUTOINST*/);
+endmodule
+"""
+
+
+# a route from a parameter-width port writes the elaborated width ([7:0], not
+# [W-1:0]); later runs must take that port as routed, not as a type mismatch
+def test_param_width_route_to_top_is_idempotent(tmp_path):
+    root = tmp_path / "param_width"
+    (root / "rtl").mkdir(parents=True)
+    (root / "rtl" / "leaf.sv").write_bytes(_PARAM_LEAF.encode())
+    (root / "rtl" / "top.sv").write_bytes(_PARAM_TOP.encode())
+    (root / "design.f").write_bytes(b"+libext+.sv+.v\nrtl/leaf.sv\nrtl/top.sv\n--top top\n")
+    r = _route(root, "--collect", "--then-expand")
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "W_PARAM_WIDTH" in out and "W_RESIDUAL" not in out and "residual edits: 0" in out
+    top = (root / "rtl" / "top.sv").read_bytes()
+    assert re.search(r"output logic \[7:0\] dbg_q,\s*// routed: u_leaf0\.q->top\.dbg_q", top.decode()), top.decode()
+    assert _inst_pins(top.decode(), "u_leaf0")["q"] == "dbg_q"
+    for _ in range(2):
+        r = _route(root, "--collect", "--then-expand")
+        out = r.stdout + r.stderr
+        assert r.returncode == 0 and "E_TYPE_MISMATCH" not in out, out
+        assert "0 edit(s)" in out and "0 changed, 0 written" in out
+        assert (root / "rtl" / "top.sv").read_bytes() == top
+    # a real width mismatch on the existing port is still refused, nothing written
+    narrowed = top.replace(b"logic [7:0] dbg_q", b"logic [3:0] dbg_q")
+    (root / "rtl" / "top.sv").write_bytes(narrowed)
+    r = _route(root, "--collect", "--then-expand")
+    assert r.returncode == 2 and "E_TYPE_MISMATCH" in r.stdout + r.stderr, r.stdout + r.stderr
+    assert (root / "rtl" / "top.sv").read_bytes() == narrowed

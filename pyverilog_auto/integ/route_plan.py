@@ -320,7 +320,7 @@ class RoutePlanner:
                 if dst_pinfo.direction != expected_dir:
                     self._err("E_DIRECTION_MISMATCH", f"{dst_inst.path}.{pair.dst.port} is {dst_pinfo.direction}, expected {expected_dir} for src {pair.src} ({src_ep.direction})", route=label, inst=dst_inst)
                     return None
-                if not self._types_compatible(src_ep, dst_pinfo):
+                if not self._types_compatible(src_ep, dst_pinfo, dst_inst, pair.dst.port):
                     d = Diagnostic("E_TYPE_MISMATCH" if pair.spec.check_types else "W_TYPE_MISMATCH",
                                    "error" if pair.spec.check_types else "warning",
                                    f"{dst_inst.path}.{pair.dst.port} type '{dst_pinfo.type_text or ''} {dst_pinfo.packed_dims}' differs from src '{src_ep.symbolic_type_text or ''} {src_ep.symbolic_packed_dims}'",
@@ -338,7 +338,8 @@ class RoutePlanner:
     def _norm_dims(s: Optional[str]) -> str:
         return re.sub(r"\s+", "", s or "")
 
-    def _types_compatible(self, ep: ElaboratedPort, p: PortInfo) -> bool:
+    def _types_compatible(self, ep: ElaboratedPort, p: PortInfo, inst: Optional[Instance] = None,
+                          port: Optional[str] = None) -> bool:
         if ep.kind == "struct":
             want = ep.struct_qualified_name or ""
             return (p.type_text or "").split()[-1] == want or (p.type_text or "").endswith(want.split("::")[-1])
@@ -354,7 +355,17 @@ class RoutePlanner:
         # symbolic texts differ: compare evaluated width when possible
         if ep.bit_width is not None and not b and ep.bit_width == 1:
             return True
-        return False
+        # ... else the elaborated types, e.g. src [W-1:0] against the [7:0] an
+        # earlier run wrote for a parameter-dependent width (re-runs are no-ops)
+        if inst is None or port is None or not ep.bit_width:
+            return False
+        try:
+            dst_ep = self.design.port_at(inst, port)
+        except LookupError:
+            return False
+        return (dst_ep.kind == "signal" and dst_ep.bit_width == ep.bit_width
+                and self._norm_dims(dst_ep.packed_dims_numeric) == self._norm_dims(ep.packed_dims_numeric)
+                and self._norm_dims(ep.unpacked_dims) == self._norm_dims(p.unpacked_dims))
 
     # ------------------------------------------------------------------
     # Phase B: identities

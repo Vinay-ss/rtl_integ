@@ -550,7 +550,7 @@ class WrapPlanner:
             if ep.kind == "iface":
                 return ep.iface_type or "", "", ""
             if p.expr.strip() == n:
-                return "logic", ep.packed_dims_numeric, ""
+                return "logic", ep.packed_dims_numeric, ep.unpacked_dims_numeric
         return "logic", "", ""
 
     def _carry_or_freeze(self, out: OutputInfo, units: list[Unit]) -> tuple[list[list[str]], Optional[Binding]]:

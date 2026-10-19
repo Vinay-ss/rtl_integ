@@ -247,7 +247,7 @@ class ElaboratedPort:
     kind: Literal["signal", "struct", "iface"]
     direction: Optional[str]                 # input | output | inout | ref | None (interface)
     type_text_numeric: str                   # evaluated type, e.g. "logic[7:0]"
-    packed_dims_numeric: str                 # "[7:0]" from the elaborated type (or "")
+    packed_dims_numeric: str                 # every packed dim of the elaborated type, "[3:0][7:0]" (or "")
     unpacked_dims: str                       # symbolic text of unpacked dims (or "")
     bit_width: Optional[int]
     is_struct: bool = False
@@ -255,9 +255,10 @@ class ElaboratedPort:
     struct_is_local: bool = False
     iface_type: Optional[str] = None
     modport: Optional[str] = None
-    param_dependent: bool = False            # symbolic width mentions a parameter of the module
+    param_dependent: bool = False            # symbolic packed or unpacked dims mention a parameter of the module
     symbolic_packed_dims: str = ""           # from the source text (PortInfo)
     symbolic_type_text: Optional[str] = None
+    unpacked_dims_numeric: str = ""          # unpacked dims of the elaborated type, "[0:3]" for [N] (or "")
 
 
 @dataclass

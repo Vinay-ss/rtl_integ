@@ -477,7 +477,8 @@ class HoistPlanner:
                 unpacked = fold_constants(subst_identifiers(d.unpacked, mapping))
                 typ = d.type_text or "logic"
             else:
-                typ, dims, unpacked = "logic", self._x_port_dims(X, uX, n), ""
+                dims, unpacked = self._x_port_dims(X, uX, n)
+                typ = "logic"
             decl_lines.append(f"{typ} {dims} {net}{unpacked};".replace("  ", " ").replace(" ;", ";"))
         port_expr: dict[str, str] = {}
         for p in ports:
@@ -576,14 +577,15 @@ class HoistPlanner:
         for wi in c.insts:
             plan.renames[f"{wi.path}.{X.name}"] = f"{wi.parent.path}.{c.x_name}"
 
-    def _x_port_dims(self, X: Instance, uX: InstUse, n: str) -> str:
+    def _x_port_dims(self, X: Instance, uX: InstUse, n: str) -> tuple[str, str]:
         for pin in uX.pins:
             if pin.expr.strip() == n:
                 try:
-                    return self.design.port_at(X, pin.port).packed_dims_numeric
+                    ep = self.design.port_at(X, pin.port)
                 except Exception:
-                    return ""
-        return ""
+                    return "", ""
+                return ep.packed_dims_numeric, ep.unpacked_dims_numeric
+        return "", ""
 
 
 def _split_entries(inner: str) -> list[str]:

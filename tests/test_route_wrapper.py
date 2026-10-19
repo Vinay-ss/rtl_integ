@@ -288,3 +288,74 @@ def test_param_width_route_to_top_is_idempotent(tmp_path):
     r = _route(root, "--collect", "--then-expand")
     assert r.returncode == 2 and "E_TYPE_MISMATCH" in r.stdout + r.stderr, r.stdout + r.stderr
     assert (root / "rtl" / "top.sv").read_bytes() == narrowed
+
+
+_PARAM_2D_LEAF = """\
+module leaf #(parameter W = 8, parameter N = 4)
+  (input  logic                clk,
+   output logic [N-1:0][W-1:0] q,
+   output logic [W-1:0]        u [N]);
+endmodule
+"""
+
+_PARAM_2D_SINK = """\
+module sink
+  (input logic                clk,
+   input logic [3:0][7:0]     q_in,
+   input logic [7:0]          u_in [4]);
+endmodule
+"""
+
+_PARAM_2D_TOP = """\
+module top
+  (/*AUTOINPUT*/
+   /*AUTOOUTPUT*/
+   );
+
+   //auto_route u_leaf0:q :: to :: $top:dbg_q
+   //auto_route u_leaf0:u :: to :: $top:dbg_u
+   //auto_route u_leaf1:q :: to :: u_sink0:q_in
+   //auto_route u_leaf1:u :: to :: u_sink0:u_in
+   /*AUTOWIRE*/
+
+   leaf u_leaf0 (/*AUTOINST*/);
+   leaf u_leaf1 (/*AUTOINST*/);
+   sink u_sink0 (/*AUTOINST*/);
+endmodule
+"""
+
+
+# a parameter-dependent port with more than one dimension is written with all
+# of its elaborated dims ([3:0][7:0], not only the outer [3:0]; unpacked [N] as
+# [0:3]) on ports and nets; existing ports of that shape are taken as routed
+def test_param_2d_route_writes_every_dim_and_is_idempotent(tmp_path):
+    root = tmp_path / "param_2d"
+    (root / "rtl").mkdir(parents=True)
+    for name, text in (("leaf.sv", _PARAM_2D_LEAF), ("sink.sv", _PARAM_2D_SINK), ("top.sv", _PARAM_2D_TOP)):
+        (root / "rtl" / name).write_bytes(text.encode())
+    (root / "design.f").write_bytes(b"+libext+.sv+.v\nrtl/leaf.sv\nrtl/sink.sv\nrtl/top.sv\n--top top\n")
+    r = _route(root, "--collect", "--then-expand")
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "W_RESIDUAL" not in out and "E_TYPE_MISMATCH" not in out and "residual edits: 0" in out
+    assert "elaborated width [3:0][7:0]" in out and "elaborated width [7:0] [0:3]" in out
+    top = (root / "rtl" / "top.sv").read_bytes()
+    text = top.decode()
+    assert re.search(r"output logic \[3:0\]\[7:0\] dbg_q,\s*// routed: u_leaf0\.q->top\.dbg_q", text), text
+    assert re.search(r"output logic \[7:0\] dbg_u \[0:3\],\s*// routed: u_leaf0\.u->top\.dbg_u", text), text
+    assert re.search(r"^\s*logic \[3:0\]\[7:0\] q_in;", text, re.M), text
+    assert re.search(r"^\s*logic \[7:0\] u_in \[0:3\];", text, re.M), text
+    assert _inst_pins(text, "u_leaf0")["q"] == "dbg_q" and _inst_pins(text, "u_leaf0")["u"] == "dbg_u"
+    assert _inst_pins(text, "u_leaf1")["q"] == "q_in" and _inst_pins(text, "u_sink0")["u_in"] == "u_in"
+    for _ in range(2):
+        r = _route(root, "--collect", "--then-expand")
+        out = r.stdout + r.stderr
+        assert r.returncode == 0 and "E_TYPE_MISMATCH" not in out, out
+        assert "0 edit(s)" in out and "0 changed, 0 written" in out
+        assert (root / "rtl" / "top.sv").read_bytes() == top
+    # the same 32 bits in another shape is still refused, nothing written
+    reshaped = top.replace(b"logic [3:0][7:0] dbg_q", b"logic [7:0][3:0] dbg_q")
+    (root / "rtl" / "top.sv").write_bytes(reshaped)
+    r = _route(root, "--collect", "--then-expand")
+    assert r.returncode == 2 and "E_TYPE_MISMATCH" in r.stdout + r.stderr, r.stdout + r.stderr
+    assert (root / "rtl" / "top.sv").read_bytes() == reshaped

@@ -169,6 +169,109 @@ def test_param_dependent_width_is_explicit_with_warning(tmp_path):
 
 
 # ----------------------------------------------------------------------
+# Elaborated dims of multi-dimensional and unpacked ports (own small designs)
+# ----------------------------------------------------------------------
+
+def _small_design(tmp_path: Path, files: dict[str, str]) -> Path:
+    root = tmp_path / "small"
+    (root / "rtl").mkdir(parents=True)
+    for name, text in files.items():
+        (root / "rtl" / name).write_bytes(text.encode())
+    fl = "+libext+.sv+.v\n" + "".join(f"rtl/{name}\n" for name in files) + "--top top\n"
+    (root / "design.f").write_bytes(fl.encode())
+    return root
+
+
+_DIMS_LEAF = """\
+package dims_pkg;
+   typedef enum logic [1:0] {A, B, C} e_t;
+endpackage
+
+module leaf #(parameter W = 8, parameter N = 4)
+  (input  logic                 clk,
+   output logic [N-1:0][W-1:0]  q,
+   output logic [W-1:0]         u [N],
+   output logic [W-1:0]         u2 [N][2],
+   output logic [7:0]           m [4],
+   output int                   i,
+   output dims_pkg::e_t [N-1:0] ea);
+endmodule
+"""
+
+
+def test_port_at_elaborated_dims(tmp_path):
+    root = _small_design(tmp_path, {"leaf.sv": _DIMS_LEAF,
+                                    "top.sv": "module top;\n   leaf #(.W(16)) u_leaf ();\nendmodule\n"})
+    d = _design(root)
+    leaf = d.instance("top.u_leaf")
+    dims = {p: (ep.packed_dims_numeric, ep.unpacked_dims_numeric)
+            for p in ("clk", "q", "u", "u2", "m", "i", "ea") for ep in [d.port_at(leaf, p)]}
+    assert dims == {
+        "clk": ("[0:0]", ""),                   # scalar, int and 1-D vectors as before
+        "q": ("[3:0][15:0]", ""),               # every packed dim, not only the outermost
+        "u": ("[15:0]", "[0:3]"),               # unpacked dims apart from the packed ones
+        "u2": ("[15:0]", "[0:3][0:1]"),
+        "m": ("[7:0]", "[0:3]"),
+        "i": ("[31:0]", ""),
+        "ea": ("[3:0][1:0]", ""),               # an element wider than a bit keeps its range
+    }
+    # an unpacked dim that mentions a parameter makes the port parameter-dependent
+    assert [p for p in ("q", "u", "u2", "m") if d.port_at(leaf, p).param_dependent] == ["q", "u", "u2"]
+
+
+_ROUTE_DIMS_LEAF = """\
+module leaf #(parameter W = 8, parameter N = 4)
+  (input  logic                clk,
+   output logic [N-1:0][W-1:0] q,
+   output logic [W-1:0]        u [N],
+   output logic [7:0]          m [4]);
+endmodule
+"""
+
+_ROUTE_DIMS_MID = """\
+module mid (/*AUTOARG*/);
+   input clk;
+   /*AUTOINPUT*/
+   /*AUTOOUTPUT*/
+   /*AUTOWIRE*/
+   leaf #(.W(16)) u_leaf (/*AUTOINST*/);
+endmodule
+"""
+
+_ROUTE_DIMS_TOP = """\
+module top
+  (/*AUTOINPUT*/
+   /*AUTOOUTPUT*/
+   );
+   /*AUTOWIRE*/
+   mid u_mid (/*AUTOINST*/);
+endmodule
+"""
+
+
+# a parameter-dependent port is written with all of its elaborated dims, packed
+# and unpacked, at every level (here a non-ANSI one that overrides W)
+def test_param_dims_route_through_non_ansi_level(tmp_path):
+    root = _small_design(tmp_path, {"leaf.sv": _ROUTE_DIMS_LEAF, "mid.sv": _ROUTE_DIMS_MID,
+                                    "top.sv": _ROUTE_DIMS_TOP})
+    specs = [RouteSpec(src=rf"top\.u_mid\.u_leaf:{p}", dst=f"top:dbg_{p}") for p in ("q", "u", "m")]
+    report = _design(root).apply_routes(specs, then_expand=True)
+    assert not report.errors and report.residual == []
+    assert sorted(w.message.split(": ", 1)[0] for w in report.warnings if w.code == "W_PARAM_WIDTH") == \
+        ["top.u_mid.u_leaf:q", "top.u_mid.u_leaf:u"]
+    mid = (root / "rtl" / "mid.sv").read_text()
+    top = (root / "rtl" / "top.sv").read_text()
+    assert "output logic [3:0][15:0] q;" in mid and "output logic [15:0] u [0:3];" in mid
+    assert "output logic [3:0][15:0] dbg_q," in top and "output logic [15:0] dbg_u [0:3]," in top
+    assert "output logic [7:0] dbg_m [4]," in top            # no parameter: the source text
+    files = [root / "rtl" / n for n in ("leaf.sv", "mid.sv", "top.sv")]
+    before = [f.read_bytes() for f in files]
+    report = _design(root).apply_routes(specs, then_expand=True)
+    assert not report.errors and report.edits == [] and report.files_changed == [] and report.residual == []
+    assert [f.read_bytes() for f in files] == before
+
+
+# ----------------------------------------------------------------------
 # One net name across wrapper instances (mem is instantiated in top and sim_top)
 # ----------------------------------------------------------------------
 

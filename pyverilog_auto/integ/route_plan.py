@@ -321,9 +321,11 @@ class RoutePlanner:
                     self._err("E_DIRECTION_MISMATCH", f"{dst_inst.path}.{pair.dst.port} is {dst_pinfo.direction}, expected {expected_dir} for src {pair.src} ({src_ep.direction})", route=label, inst=dst_inst)
                     return None
                 if not self._types_compatible(src_ep, dst_pinfo, dst_inst, pair.dst.port):
+                    dst_t = " ".join(x for x in (dst_pinfo.type_text, dst_pinfo.packed_dims, dst_pinfo.unpacked_dims) if x)
+                    src_t = " ".join(x for x in (src_ep.symbolic_type_text, src_ep.symbolic_packed_dims, src_ep.unpacked_dims) if x)
                     d = Diagnostic("E_TYPE_MISMATCH" if pair.spec.check_types else "W_TYPE_MISMATCH",
                                    "error" if pair.spec.check_types else "warning",
-                                   f"{dst_inst.path}.{pair.dst.port} type '{dst_pinfo.type_text or ''} {dst_pinfo.packed_dims}' differs from src '{src_ep.symbolic_type_text or ''} {src_ep.symbolic_packed_dims}'",
+                                   f"{dst_inst.path}.{pair.dst.port} type '{dst_t}' differs from src '{src_t}'",
                                    self.design.files[dst_inst.file].path if dst_inst.file else None, None, route=label)
                     if pair.spec.check_types:
                         self.errors.append(d)
@@ -353,11 +355,12 @@ class RoutePlanner:
         if a == b and self._norm_dims(ep.unpacked_dims) == self._norm_dims(p.unpacked_dims):
             return True
         # symbolic texts differ: compare evaluated width when possible
-        if ep.bit_width is not None and not b and ep.bit_width == 1:
+        if ep.bit_width is not None and not b and ep.bit_width == 1 and not p.unpacked_dims:
             return True
         # ... else the elaborated types, e.g. src [W-1:0] against the [7:0] an
-        # earlier run wrote for a parameter-dependent width (re-runs are no-ops)
-        if inst is None or port is None or not ep.bit_width:
+        # earlier run wrote for a parameter-dependent width (re-runs are no-ops);
+        # an unpacked array has bit width 0 and is compared by its dims
+        if inst is None or port is None or ep.bit_width is None:
             return False
         try:
             dst_ep = self.design.port_at(inst, port)
@@ -365,7 +368,7 @@ class RoutePlanner:
             return False
         return (dst_ep.kind == "signal" and dst_ep.bit_width == ep.bit_width
                 and self._norm_dims(dst_ep.packed_dims_numeric) == self._norm_dims(ep.packed_dims_numeric)
-                and self._norm_dims(ep.unpacked_dims) == self._norm_dims(p.unpacked_dims))
+                and self._norm_dims(dst_ep.unpacked_dims_numeric) == self._norm_dims(ep.unpacked_dims_numeric))
 
     # ------------------------------------------------------------------
     # Phase B: identities
@@ -406,7 +409,10 @@ class RoutePlanner:
             if net.kind == "struct" and net.src_ep.struct_is_local:
                 self._err("E_LOCAL_TYPEDEF", f"{net.identity}: struct type {net.src_ep.struct_qualified_name} is a module-local typedef; move it to a package", route=label)
             if net.src_ep.param_dependent:
-                self._warn("W_PARAM_WIDTH", f"{net.identity}: width {net.src_ep.symbolic_packed_dims} depends on a parameter; ports are written explicitly with the elaborated width {net.src_ep.packed_dims_numeric}", route=label)
+                ep = net.src_ep
+                sym = " ".join(d for d in (ep.symbolic_packed_dims, ep.unpacked_dims) if d)
+                num = " ".join(d for d in self._decl_dims(ep) if d)
+                self._warn("W_PARAM_WIDTH", f"{net.identity}: width {sym} depends on a parameter; ports are written explicitly with the elaborated width {num}", route=label)
         return list(nets.values())
 
     # ------------------------------------------------------------------
@@ -762,7 +768,7 @@ class RoutePlanner:
         sym = ep.symbolic_type_text or ""
         if "signed" in sym.split() or "signed" in (ep.type_text_numeric or ""):
             pass
-        dims = ep.packed_dims_numeric if ep.param_dependent else ep.symbolic_packed_dims
+        dims, unpacked = self._decl_dims(ep)
         src_pinfo = None
         for pp in net.pairs:
             if pp.src_inst.module is not None:
@@ -772,8 +778,19 @@ class RoutePlanner:
         if dims:
             parts.append(dims)
         parts.append(name)
+        if unpacked:
+            parts.append(unpacked)
         text = " ".join(parts)
         return text if ansi else text + ";"
+
+    @staticmethod
+    def _decl_dims(ep: ElaboratedPort) -> tuple[str, str]:
+        """Packed and unpacked dims written for a routed signal: the source
+        port's text, or its elaborated dims when that text mentions a
+        parameter (not visible where the port or net is written)."""
+        if not ep.param_dependent:
+            return ep.symbolic_packed_dims, ep.unpacked_dims
+        return (ep.packed_dims_numeric if ep.symbolic_packed_dims else ""), ep.unpacked_dims_numeric
 
     def _net_decl_text(self, net: RouteNet, mod: ModuleDef, name: str) -> str:
         ep = net.src_ep
@@ -787,10 +804,12 @@ class RoutePlanner:
                 src_pinfo = pp.src_inst.module.port(pp.pair.src.port) or src_pinfo
         if src_pinfo is not None and src_pinfo.signed:
             parts.append(src_pinfo.signed)
-        dims = ep.packed_dims_numeric if ep.param_dependent else ep.symbolic_packed_dims
+        dims, unpacked = self._decl_dims(ep)
         if dims:
             parts.append(dims)
         parts.append(name)
+        if unpacked:
+            parts.append(unpacked)
         return " ".join(parts) + ";"
 
     def _iface_inst_text(self, net: RouteNet, host: Instance, name: str, res: RouteResult) -> str:

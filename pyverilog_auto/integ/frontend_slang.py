@@ -678,22 +678,54 @@ class SlangFrontend:
             if local:
                 qualified = t.name
         packed_numeric = ""
+        unpacked_numeric: Optional[str] = None
         width = None
         try:
-            if t.hasFixedRange:
-                r = t.fixedRange
-                packed_numeric = f"[{r.left}:{r.right}]" if hasattr(r, "left") else str(r)
+            packed_numeric, unpacked_numeric = self._elab_dims(t)
             width = int(t.bitWidth)
         except Exception:
             pass
         param_dependent = False
-        if pinfo and inst.module is not None and sym_packed:
+        if pinfo and inst.module is not None and (sym_packed or unpacked):
             params = set(inst.module.params)
-            idents = set(re.findall(r"[A-Za-z_]\w*", sym_packed))
+            idents = set(re.findall(r"[A-Za-z_]\w*", sym_packed + unpacked))
             param_dependent = bool(idents & params)
         return ElaboratedPort(
             name=port, kind="struct" if is_struct else "signal", direction=direction,
             type_text_numeric=str(t), packed_dims_numeric=packed_numeric, unpacked_dims=unpacked,
             bit_width=width, is_struct=is_struct, struct_qualified_name=qualified, struct_is_local=local,
             param_dependent=param_dependent, symbolic_packed_dims=sym_packed, symbolic_type_text=sym_type,
+            unpacked_dims_numeric=unpacked if unpacked_numeric is None else unpacked_numeric,
         )
+
+    @staticmethod
+    def _elab_dims(t) -> tuple[str, Optional[str]]:
+        """Packed and unpacked dimensions of the elaborated type *t*, each
+        outermost first: ``("[3:0][7:0]", "[0:3]")`` for
+        ``logic [N-1:0][W-1:0] x [N]`` with N=4, W=8.
+
+        A packed array's element adds its own range unless it is a single bit
+        (``pkg::e_t [3:0]`` of a 2-bit enum is "[3:0][1:0]"), so the dims
+        always multiply out to the bit width; a type that is not a packed
+        array gives its range ("[0:0]" for a scalar, "[31:0]" for int).  The
+        unpacked part is None when a dimension is not fixed-size (dynamic,
+        queue, associative)."""
+        def rng(r) -> str:
+            return f"[{r.left}:{r.right}]" if hasattr(r, "left") else str(r)
+
+        cur = t.canonicalType
+        unpacked: list[str] = []
+        fixed = True
+        while cur.isUnpackedArray:
+            if cur.hasFixedRange:
+                unpacked.append(rng(cur.fixedRange))
+            else:
+                fixed = False
+            cur = cur.elementType.canonicalType
+        packed: list[str] = []
+        while cur.isPackedArray:
+            packed.append(rng(cur.fixedRange))
+            cur = cur.elementType.canonicalType
+        if cur.hasFixedRange and (not packed or cur.bitWidth > 1):
+            packed.append(rng(cur.fixedRange))
+        return "".join(packed), ("".join(unpacked) if fixed else None)
